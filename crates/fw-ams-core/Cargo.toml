@@ -6,8 +6,12 @@ license.workspace = true
 
 [dependencies]
 framework_lib.workspace = true
+dmidecode = { version = "1", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
-thiserror.workspace = true
 nusb.workspace = true
+ts-rs = "12"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+starship-battery = "0.12"

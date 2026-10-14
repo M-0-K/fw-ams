@@ -1,0 +1,2 @@
+# fw-ams: allow the logged-in user to access the Framework embedded controller
+KERNEL=="cros_ec", SUBSYSTEM=="chromeos", TAG+="uaccess"
