@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "fw-ams",
+  "version": "0.1.0",
+  "identifier": "io.github.fw-ams",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "fw-ams",
+        "width": 1120,
+        "height": 780,
+        "minWidth": 760,
+        "minHeight": 540,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "deb", "rpm", "appimage"],
+    "category": "Utility",
+    "shortDescription": "Framework laptop monitoring",
+    "longDescription": "Battery, USB-C Power Delivery, thermals and expansion card detection for Framework laptops.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/udev/rules.d/99-fw-ams.rules": "../../packaging/linux/99-fw-ams.rules"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/lib/udev/rules.d/99-fw-ams.rules": "../../packaging/linux/99-fw-ams.rules"
+        }
+      }
+    }
+  }
+}

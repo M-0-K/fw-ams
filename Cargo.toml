@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fw-ams-core", "crates/fw-ams-cli"]
+members = ["crates/fw-ams-core", "crates/fw-ams-cli", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
