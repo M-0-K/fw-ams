@@ -22,6 +22,23 @@ cargo run -p fw-ams-cli -- dump     # Snapshot als JSON
 
 `--mock` nutzt aufgezeichnete Daten statt Hardware.
 
+## App
+
+```
+cd app
+npm install
+npm run tauri dev               # Entwicklung mit Hot-Reload
+npx tauri build                 # Installer (NSIS / deb / rpm / AppImage)
+npx tauri build --no-bundle     # nur target/release/fw-ams-app.exe
+```
+
+`fw-ams-app --mock` startet mit aufgezeichneten Daten. Fenster schließen minimiert in den Tray,
+beenden über Tray → „Beenden“. Einstellungen liegen in `%APPDATA%\io.github.fw-ams\settings.json`
+bzw. `~/.config/io.github.fw-ams/settings.json`.
+
+Linux-Build-Abhängigkeiten: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+libudev-dev libusb-1.0-0-dev`.
+
 ## EC-Zugriff
 
 - **Windows:** Framework-EC-Treiber (im Framework Driver Bundle, aktuelles BIOS). Keine Admin-Rechte nötig.
