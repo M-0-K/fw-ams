@@ -6,7 +6,7 @@ members = ["crates/fw-ams-core", "crates/fw-ams-cli", "app/src-tauri"]
 version = "0.1.0"
 edition = "2021"
 license = "BSD-3-Clause"
-repository = "https://github.com/fw-ams/fw-ams"
+repository = "https://github.com/M-0-K/fw-ams"
 
 [workspace.dependencies]
 fw-ams-core = { path = "crates/fw-ams-core" }

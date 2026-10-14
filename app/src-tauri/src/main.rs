@@ -1,6 +1,7 @@
 // Prevents an additional console window on Windows in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod flyout;
 mod settings;
 mod tray;
 
@@ -28,6 +29,12 @@ type SharedState = Arc<AppState>;
 #[tauri::command]
 fn get_snapshot(state: State<SharedState>) -> Option<Snapshot> {
     state.latest.read().unwrap().clone()
+}
+
+#[tauri::command]
+fn show_main(app: AppHandle) {
+    flyout::hide(&app);
+    show_main_window(&app);
 }
 
 #[tauri::command]
@@ -104,6 +111,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let use_mock = args.iter().any(|a| a == "--mock") || std::env::var_os("FW_AMS_MOCK").is_some();
     let started_minimized = args.iter().any(|a| a == "--minimized");
+    // Debug aid: open the tray flyout right away
+    let open_flyout = args.iter().any(|a| a == "--flyout");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -136,20 +145,29 @@ fn main() {
             app.manage(state.clone());
 
             tray::create(&handle)?;
+            flyout::create(&handle)?;
             if !stay_in_tray {
                 show_main_window(&handle);
+            }
+            if open_flyout {
+                flyout::show_in_corner(&handle);
             }
             spawn_poller(handle, state, use_mock);
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|window, event| match event {
             // Closing the window keeps the app running in the tray
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            // Linux flyout is opened from the menu and closes when it loses focus
+            WindowEvent::Focused(false) if cfg!(target_os = "linux") && window.label() == flyout::LABEL => {
+                let _ = window.hide();
+            }
+            _ => {}
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, get_settings, set_settings])
+        .invoke_handler(tauri::generate_handler![get_snapshot, get_settings, set_settings, show_main])
         .run(tauri::generate_context!())
         .expect("error while running fw-ams");
 }
