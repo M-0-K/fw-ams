@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 fw-ams-core.workspace = true
+fw-ams-tuner.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
