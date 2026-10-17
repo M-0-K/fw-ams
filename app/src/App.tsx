@@ -1,5 +1,7 @@
-import { useState } from "react";
-import { useSnapshot } from "./api";
+import { listen } from "@tauri-apps/api/event";
+import { useEffect, useState } from "react";
+import { useSettings, useSnapshot } from "./api";
+import { useTheme } from "./theme";
 import Overview from "./pages/Overview";
 import Ports from "./pages/Ports";
 import ThermalPage from "./pages/Thermal";
@@ -19,6 +21,21 @@ type PageId = (typeof pages)[number]["id"];
 export default function App() {
   const [page, setPage] = useState<PageId>("overview");
   const snapshot = useSnapshot();
+  const [slot, setSlot] = useState<number>();
+  useTheme(useSettings()?.theme);
+
+  const openPorts = (n?: number) => {
+    setSlot(n);
+    setPage("ports");
+  };
+
+  // The tray flyout asks to show one slot
+  useEffect(() => {
+    const unlisten = listen<number>("navigate", (e) => openPorts(e.payload));
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   return (
     <div className="flex h-screen">
@@ -57,8 +74,8 @@ export default function App() {
                 {snapshot.access.hint}
               </div>
             )}
-            {page === "overview" && <Overview s={snapshot} onOpenPorts={() => setPage("ports")} />}
-            {page === "ports" && <Ports s={snapshot} />}
+            {page === "overview" && <Overview s={snapshot} onOpenPorts={openPorts} />}
+            {page === "ports" && <Ports s={snapshot} initialSlot={slot} />}
             {page === "thermal" && <ThermalPage s={snapshot} />}
             {page === "system" && <SystemPage s={snapshot} />}
           </>
