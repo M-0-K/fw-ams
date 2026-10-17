@@ -6,6 +6,7 @@ pub mod cards;
 pub mod collector;
 pub mod mock;
 pub mod model;
+pub mod saver;
 pub mod source;
 
 pub use collector::Collector;

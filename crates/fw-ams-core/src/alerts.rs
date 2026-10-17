@@ -10,6 +10,9 @@ use ts_rs::TS;
 pub struct AlertSettings {
     pub battery_low: bool,
     pub battery_low_percent: u8,
+    /// Second, more urgent level below `battery_low_percent`
+    pub battery_critical: bool,
+    pub battery_critical_percent: u8,
     pub charge_limit_reached: bool,
     pub weak_charger: bool,
     pub weak_charger_watts: u32,
@@ -23,7 +26,9 @@ impl Default for AlertSettings {
     fn default() -> Self {
         Self {
             battery_low: true,
-            battery_low_percent: 15,
+            battery_low_percent: 20,
+            battery_critical: true,
+            battery_critical_percent: 10,
             charge_limit_reached: true,
             weak_charger: true,
             weak_charger_watts: 45,
@@ -48,6 +53,7 @@ const TEMP_HYSTERESIS: f32 = 5.0;
 #[derive(Debug, Default)]
 pub struct AlertState {
     battery_low_fired: bool,
+    battery_critical_fired: bool,
     limit_fired: bool,
     weak_charger_fired: bool,
     throttle_fired: bool,
@@ -66,16 +72,34 @@ impl AlertState {
         };
 
         if let Some(b) = &s.battery {
+            let discharging = b.state == ChargeState::Discharging;
+            let rearm = |level: f32| b.soc_percent > level + SOC_HYSTERESIS || b.state == ChargeState::Charging;
+
+            // The critical level wins: crossing both at once only shows the critical alert
+            let critical = cfg.battery_critical_percent as f32;
+            let critical_now = discharging && b.soc_percent <= critical;
+            if critical_now {
+                if !self.battery_critical_fired && cfg.battery_critical {
+                    alert(
+                        "Akku kritisch",
+                        format!("Nur noch {:.0} % – jetzt Netzteil anschließen!", b.soc_percent),
+                    );
+                }
+                self.battery_critical_fired = true;
+            } else if rearm(critical) {
+                self.battery_critical_fired = false;
+            }
+
             let low = cfg.battery_low_percent as f32;
-            if b.state == ChargeState::Discharging && b.soc_percent <= low {
-                if !self.battery_low_fired && cfg.battery_low {
+            if discharging && b.soc_percent <= low {
+                if !self.battery_low_fired && cfg.battery_low && !(critical_now && cfg.battery_critical) {
                     alert(
                         "Akku fast leer",
                         format!("Noch {:.0} % – Netzteil anschließen.", b.soc_percent),
                     );
                 }
                 self.battery_low_fired = true;
-            } else if b.soc_percent > low + SOC_HYSTERESIS || b.state == ChargeState::Charging {
+            } else if rearm(low) {
                 self.battery_low_fired = false;
             }
 
@@ -185,17 +209,47 @@ mod tests {
         let mut s = mock::snapshot();
         let b = s.battery.as_mut().unwrap();
         b.state = ChargeState::Discharging;
-        b.soc_percent = 14.0;
+        b.soc_percent = 19.0;
         assert_eq!(st.evaluate(&s, &cfg).len(), 1);
         assert!(st.evaluate(&s, &cfg).is_empty());
 
-        s.battery.as_mut().unwrap().soc_percent = 12.0;
+        s.battery.as_mut().unwrap().soc_percent = 17.0;
         assert!(st.evaluate(&s, &cfg).is_empty());
 
-        s.battery.as_mut().unwrap().soc_percent = 25.0;
+        s.battery.as_mut().unwrap().soc_percent = 30.0;
         st.evaluate(&s, &cfg);
-        s.battery.as_mut().unwrap().soc_percent = 14.0;
+        s.battery.as_mut().unwrap().soc_percent = 19.0;
         assert_eq!(st.evaluate(&s, &cfg).len(), 1);
+    }
+
+    #[test]
+    fn battery_critical_follows_low() {
+        let cfg = AlertSettings::default();
+        let mut st = AlertState::default();
+        let mut s = mock::snapshot();
+        let b = s.battery.as_mut().unwrap();
+        b.state = ChargeState::Discharging;
+        b.soc_percent = 18.0;
+        assert_eq!(st.evaluate(&s, &cfg)[0].title, "Akku fast leer");
+
+        s.battery.as_mut().unwrap().soc_percent = 9.0;
+        let alerts = st.evaluate(&s, &cfg);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "Akku kritisch");
+        assert!(st.evaluate(&s, &cfg).is_empty());
+    }
+
+    #[test]
+    fn battery_critical_alone_when_both_crossed() {
+        let cfg = AlertSettings::default();
+        let mut st = AlertState::default();
+        let mut s = mock::snapshot();
+        let b = s.battery.as_mut().unwrap();
+        b.state = ChargeState::Discharging;
+        b.soc_percent = 5.0;
+        let alerts = st.evaluate(&s, &cfg);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "Akku kritisch");
     }
 
     #[test]

@@ -110,7 +110,10 @@ pub struct Battery {
     /// Last full charge capacity / design capacity
     pub health_percent: Option<f32>,
     pub cycle_count: Option<u32>,
+    /// Upper charge limit (EC stops charging here)
     pub charge_limit_percent: Option<u8>,
+    /// Lower end of the sustainer range; current Framework firmware ignores it
+    pub charge_limit_min_percent: Option<u8>,
     /// Time until empty (discharging) or until the charge limit (charging)
     pub minutes_remaining: Option<u32>,
     pub temperature_c: Option<f32>,

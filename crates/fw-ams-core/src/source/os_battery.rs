@@ -43,6 +43,7 @@ pub fn battery() -> Option<Battery> {
         health_percent: Some(bat.state_of_health().get::<percent>()),
         cycle_count: bat.cycle_count(),
         charge_limit_percent: None,
+        charge_limit_min_percent: None,
         minutes_remaining: minutes,
         temperature_c: bat.temperature().map(|t| t.get::<degree_celsius>()),
         manufacturer: bat.vendor().map(str::to_owned),

@@ -128,7 +128,7 @@ pub fn snapshot() -> Snapshot {
     let power = raw_power();
     let ports = build_ports(model, &raw_pd_states(), &raw_pd_power());
     let layout = slots::layout(model);
-    let mut battery = build_battery(&power, Some(80));
+    let mut battery = build_battery(&power, Some((0, 80)));
     if let Some(b) = &mut battery {
         b.source = DataSource::Mock;
     }
