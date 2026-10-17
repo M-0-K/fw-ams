@@ -7,12 +7,14 @@ import Ports from "./pages/Ports";
 import ThermalPage from "./pages/Thermal";
 import SystemPage from "./pages/System";
 import SettingsPage from "./pages/Settings";
+import AdvancedPage from "./pages/Advanced";
 
 const pages = [
   { id: "overview", label: "Übersicht", icon: "◐" },
   { id: "ports", label: "Ports & Karten", icon: "⇆" },
   { id: "thermal", label: "Thermik", icon: "≋" },
   { id: "system", label: "System", icon: "ⓘ" },
+  { id: "advanced", label: "Erweitert", icon: "⚡" },
   { id: "settings", label: "Einstellungen", icon: "⚙" },
 ] as const;
 
@@ -78,6 +80,7 @@ export default function App() {
             {page === "ports" && <Ports s={snapshot} initialSlot={slot} />}
             {page === "thermal" && <ThermalPage s={snapshot} />}
             {page === "system" && <SystemPage s={snapshot} />}
+            {page === "advanced" && <AdvancedPage s={snapshot} />}
           </>
         )}
         {page === "settings" && <SettingsPage />}

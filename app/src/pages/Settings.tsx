@@ -1,112 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
+import { NumberInput, Row, Switch } from "../components/controls";
 import type { AlertSettings } from "../bindings/AlertSettings";
+import type { BatterySettings } from "../bindings/BatterySettings";
 import type { Settings } from "../bindings/Settings";
 import type { Theme } from "../bindings/Theme";
 import { getSettings, setSettings } from "../api";
-
-function Switch({
-  checked,
-  onChange,
-  label,
-  disabled,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  label: string;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className={`relative h-6 w-11 shrink-0 rounded-full transition disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent ${
-        checked ? "bg-accent" : "bg-slate-300 dark:bg-slate-600"
-      }`}
-    >
-      <span
-        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-          checked ? "translate-x-5" : ""
-        }`}
-      />
-    </button>
-  );
-}
-
-const show = (v: number) => String(v).replace(".", ",");
-
-/** Number field that only commits valid values: empty or invalid input falls back to the old value */
-function NumberInput({
-  value,
-  min,
-  max,
-  unit,
-  disabled,
-  onCommit,
-}: {
-  value: number;
-  min: number;
-  max: number;
-  unit: string;
-  disabled?: boolean;
-  onCommit: (v: number) => void;
-}) {
-  const [text, setText] = useState(show(value));
-  const timer = useRef<number | undefined>(undefined);
-
-  useEffect(() => {
-    setText(show(value));
-  }, [value]);
-
-  const commit = (raw: string) => {
-    window.clearTimeout(timer.current);
-    const parsed = Number(raw.replace(",", "."));
-    if (raw.trim() === "" || !Number.isFinite(parsed)) {
-      setText(show(value));
-      return;
-    }
-    const clamped = Math.min(max, Math.max(min, parsed));
-    setText(show(clamped));
-    if (clamped !== value) onCommit(clamped);
-  };
-
-  return (
-    <span className={`flex items-center gap-1.5 text-sm ${disabled ? "opacity-40" : ""}`}>
-      <input
-        inputMode="decimal"
-        value={text}
-        disabled={disabled}
-        aria-label={`Wert in ${unit}`}
-        onChange={(e) => {
-          setText(e.target.value);
-          window.clearTimeout(timer.current);
-          const next = e.target.value;
-          timer.current = window.setTimeout(() => commit(next), 800);
-        }}
-        onBlur={(e) => commit(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-        className="w-16 rounded-md border border-slate-300 bg-transparent px-2 py-1 text-right tabular-nums focus:border-accent focus:outline-none dark:border-slate-600"
-      />
-      <span className="w-6 text-slate-500">{unit}</span>
-    </span>
-  );
-}
-
-function Row({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-3">
-      <div className="min-w-0">
-        <div className="text-sm font-medium">{title}</div>
-        {desc && <div className="text-xs text-slate-500">{desc}</div>}
-      </div>
-      <div className="flex shrink-0 items-center gap-4">{children}</div>
-    </div>
-  );
-}
 
 const themes: { id: Theme; label: string }[] = [
   { id: "system", label: "System" },
@@ -143,6 +42,8 @@ export default function SettingsPage() {
   };
   const a = settings.alerts;
   const alerts = (patch: Partial<AlertSettings>) => update({ alerts: { ...a, ...patch } });
+  const b = settings.battery;
+  const battery = (patch: Partial<BatterySettings>) => update({ battery: { ...b, ...patch } });
 
   const testNotification = () =>
     invoke("test_notification")
@@ -205,6 +106,39 @@ export default function SettingsPage() {
       </section>
 
       <section className="card divide-y divide-slate-100 dark:divide-slate-800">
+        <h2 className="pb-2 font-semibold">Energiesparen bei niedrigem Akku</h2>
+        <Row
+          title="Automatischer Sparmodus"
+          desc="Im Akkubetrieb unter dem Schwellwert sparsamer arbeiten; ab 5 % darüber oder am Netzteil wieder normal."
+        >
+          <NumberInput
+            value={b.saverPercent}
+            min={5}
+            max={50}
+            unit="%"
+            disabled={!b.saver}
+            onCommit={(v) => battery({ saverPercent: v })}
+          />
+          <Switch label="Automatischer Sparmodus" checked={b.saver} onChange={(v) => battery({ saver: v })} />
+        </Row>
+        <Row
+          title="Windows-Energiemodus umschalten"
+          desc="„Beste Energieeffizienz“ (Framework: 15 W dauerhaft), danach den vorherigen Modus wiederherstellen."
+        >
+          <Switch
+            label="Windows-Energiemodus umschalten"
+            checked={b.saverPowerMode}
+            disabled={!b.saver}
+            onChange={(v) => battery({ saverPowerMode: v })}
+          />
+        </Row>
+        <div className="py-3 text-xs text-slate-500">
+          Zusätzlich gilt das Sparprofil unter Erweitert → Leistung &amp; Takt, sofern der Hilfsdienst installiert ist.
+          Ladelimit und Ladestrom stellst du unter Erweitert → Akkupflege ein.
+        </div>
+      </section>
+
+      <section className="card divide-y divide-slate-100 dark:divide-slate-800">
         <div className="flex items-center justify-between pb-2">
           <h2 className="font-semibold">Benachrichtigungen</h2>
           <button
@@ -217,13 +151,24 @@ export default function SettingsPage() {
         <Row title="Akku fast leer" desc="Warnung beim Entladen unter dem Schwellwert.">
           <NumberInput
             value={a.batteryLowPercent}
-            min={1}
+            min={2}
             max={99}
             unit="%"
             disabled={!a.batteryLow}
             onCommit={(v) => alerts({ batteryLowPercent: v })}
           />
           <Switch label="Akku fast leer" checked={a.batteryLow} onChange={(v) => alerts({ batteryLow: v })} />
+        </Row>
+        <Row title="Akku kritisch" desc="Zweite, dringende Warnung. Muss unter der ersten Stufe liegen.">
+          <NumberInput
+            value={a.batteryCriticalPercent}
+            min={1}
+            max={a.batteryLowPercent - 1}
+            unit="%"
+            disabled={!a.batteryCritical}
+            onCommit={(v) => alerts({ batteryCriticalPercent: v })}
+          />
+          <Switch label="Akku kritisch" checked={a.batteryCritical} onChange={(v) => alerts({ batteryCritical: v })} />
         </Row>
         <Row title="Ladelimit erreicht" desc="Die Ladung pausiert am eingestellten Limit.">
           <Switch label="Ladelimit erreicht" checked={a.chargeLimitReached} onChange={(v) => alerts({ chargeLimitReached: v })} />
