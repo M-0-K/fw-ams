@@ -11,7 +11,7 @@ use tauri::{
 };
 
 pub const LABEL: &str = "flyout";
-const WIDTH: f64 = 380.0;
+const WIDTH: f64 = 400.0;
 const HEIGHT: f64 = 420.0;
 /// Gap between tray icon and flyout
 const GAP: i32 = 12;

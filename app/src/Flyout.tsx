@@ -1,88 +1,61 @@
 import { invoke } from "@tauri-apps/api/core";
 import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef } from "react";
-import { useSnapshot } from "./api";
+import { useSettings, useSnapshot } from "./api";
 import type { PdPort } from "./bindings/PdPort";
 import type { Slot } from "./bindings/Slot";
 import type { Snapshot } from "./bindings/Snapshot";
 import { cardStyle, chargeStateLabel, num, signed } from "./format";
+import { describe, flow, slotRows } from "./slots";
+import { useTheme } from "./theme";
 
-const WIDTH = 380;
+const WIDTH = 400;
 
-type Flow = { dir: "in" | "out"; watts: number; upTo: boolean };
-
-/** What is attached to the slot, in plain words */
-function describe(slot: Slot, port?: PdPort): string {
-  const devices = slot.devices
-    .filter((d) => d.id !== slot.card.usbId)
-    .map((d) => d.product ?? d.id);
-  switch (slot.card.kind) {
-    case "hdmi":
-    case "displayPort":
-      return port?.dpAltMode ? "Monitor angeschlossen" : "kein Monitor";
-    case "usbC":
-      if (port?.partner === "source") return port.pdContract ? "Ladegerät (USB PD)" : "Ladegerät (5 V, ohne PD)";
-      if (port?.partner === "sink") return devices.join(", ") || (port.pdContract ? "Gerät mit USB PD" : "Gerät");
-      if (port?.partner === "audioAccessory") return "Audio-Adapter";
-      return devices.join(", ") || "Zubehör";
-    case "usbA":
-      return devices.join(", ") || "kein Gerät erkannt";
-    case "emptyOrPassive":
-      return "nichts angeschlossen";
-    case "unknown":
-      return devices.join(", ") || slot.card.name;
-    default:
-      return devices.join(", ") || "bereit";
-  }
-}
-
-function flow(port?: PdPort): Flow | null {
-  if (!port || port.powerW <= 0) return null;
-  if (port.powerRole === "sink") return { dir: "in", watts: port.powerW, upTo: false };
-  if (port.powerRole === "source") return { dir: "out", watts: port.powerW, upTo: !port.pdContract };
-  return null;
-}
-
-function SlotRow({ slot, port }: { slot: Slot; port?: PdPort }) {
+function Tile({ slot, port }: { slot?: Slot; port?: PdPort }) {
+  if (!slot) return <div />;
   const style = cardStyle[slot.card.kind];
   const f = flow(port);
   const warn = slot.hints.find((h) => h.severity === "warning");
   const idle = slot.card.kind === "emptyOrPassive";
   return (
-    <div className="flex items-center gap-3 py-2">
-      <div className={`flex h-9 w-12 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${style.color}`}>
-        {style.short}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="text-[11px] uppercase tracking-wide text-slate-500">{slot.location.label}</div>
-        <div className={`truncate text-sm font-medium ${idle ? "text-slate-400" : ""}`}>
-          {describe(slot, port)}
-          {port?.dpAltMode && slot.card.kind !== "hdmi" && slot.card.kind !== "displayPort" && " · Display"}
-        </div>
-        {warn && <div className="truncate text-[11px] text-red-500">{warn.message}</div>}
-      </div>
-      {f && (
-        <div className={`shrink-0 text-right tabular-nums ${f.dir === "in" ? "text-emerald-600 dark:text-emerald-400" : "text-sky-600 dark:text-sky-400"}`}>
-          <div className="text-sm font-semibold">
+    <button
+      onClick={() => invoke("show_main", { slot: slot.number })}
+      title={warn?.message ?? `${slot.location.label}: ${slot.card.name}`}
+      className={`flex min-w-0 flex-col gap-1 rounded-xl border p-2 text-left transition hover:brightness-95 dark:hover:brightness-110 ${
+        warn
+          ? "border-red-400 bg-red-50 dark:border-red-700 dark:bg-red-950"
+          : "border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${style.color}`}>{style.short}</span>
+        {f && (
+          <span
+            className={`text-xs font-semibold tabular-nums ${
+              f.dir === "in" ? "text-emerald-600 dark:text-emerald-400" : "text-sky-600 dark:text-sky-400"
+            }`}
+          >
             {f.dir === "in" ? "↓" : "↑"} {f.upTo && "≤ "}
             {num(f.watts, f.watts < 10 ? 1 : 0, "W")}
-          </div>
-          <div className="text-[10px] text-slate-500">
-            {num(port!.voltageV, 0, "V")} · {num(port!.currentA, 2, "A")}
-          </div>
+          </span>
+        )}
+      </div>
+      <div className={`line-clamp-2 min-h-8 text-xs font-medium leading-4 ${idle ? "text-slate-400 dark:text-slate-500" : ""}`}>
+        {describe(slot, port)}
+        {port?.dpAltMode && slot.card.kind !== "hdmi" && slot.card.kind !== "displayPort" && " · Display"}
+      </div>
+      {f && port && (
+        <div className="text-[10px] tabular-nums text-slate-500">
+          {num(port.voltageV, 0, "V")} · {num(port.currentA, 2, "A")}
         </div>
       )}
-    </div>
+    </button>
   );
 }
 
 function Content({ s }: { s: Snapshot }) {
   const b = s.battery;
-  const order = { left: 0, right: 1 } as const;
-  const pos = { back: 0, middle: 1, front: 2 } as const;
-  const slots = [...s.slots].sort(
-    (a, c) => order[a.location.side] - order[c.location.side] || pos[a.location.position] - pos[c.location.position],
-  );
+  const portOf = (slot?: Slot) => s.ports.find((p) => p.index === slot?.pdPort);
   const watts = (role: "sink" | "source") =>
     s.ports.filter((p) => p.powerRole === role).reduce((sum, p) => sum + p.powerW, 0);
   const totalIn = watts("sink");
@@ -91,6 +64,7 @@ function Content({ s }: { s: Snapshot }) {
     .filter((x) => x.celsius !== null)
     .sort((a, c) => (c.celsius ?? 0) - (a.celsius ?? 0))[0];
   const fan = s.thermal?.fans[0];
+  const rows = slotRows(s.slots);
 
   return (
     <>
@@ -111,10 +85,23 @@ function Content({ s }: { s: Snapshot }) {
         </div>
       </div>
 
-      <div className="divide-y divide-slate-100 dark:divide-slate-800">
-        {slots.map((slot) => (
-          <SlotRow key={slot.number} slot={slot} port={s.ports.find((p) => p.index === slot.pdPort)} />
-        ))}
+      {/* Slots as they sit in the chassis: left side, body, right side */}
+      <div className="py-3">
+        <div className="mb-1 text-center text-[10px] uppercase tracking-widest text-slate-400">hinten</div>
+        <div className="grid grid-cols-[1fr_28px_1fr] gap-x-1 gap-y-2">
+          {rows.map((row, i) => (
+            <div key={row.position} className="contents">
+              <Tile slot={row.left} port={portOf(row.left)} />
+              <div
+                className={`bg-slate-200 dark:bg-slate-700 ${i === 0 ? "rounded-t-xl" : ""} ${
+                  i === rows.length - 1 ? "rounded-b-xl" : ""
+                }`}
+              />
+              <Tile slot={row.right} port={portOf(row.right)} />
+            </div>
+          ))}
+        </div>
+        <div className="mt-1 text-center text-[10px] uppercase tracking-widest text-slate-400">vorne</div>
       </div>
 
       <div className="flex items-center justify-between border-t border-slate-200 pt-2 text-xs text-slate-500 dark:border-slate-800">
@@ -123,7 +110,7 @@ function Content({ s }: { s: Snapshot }) {
           {fan?.rpm != null && ` · Lüfter ${fan.rpm} RPM`}
           {s.thermal?.throttle?.soft || s.thermal?.throttle?.hard ? " · gedrosselt" : ""}
         </span>
-        <button onClick={() => invoke("show_main")} className="font-medium text-accent hover:underline">
+        <button onClick={() => invoke("show_main", { slot: null })} className="font-medium text-accent hover:underline">
           App öffnen →
         </button>
       </div>
@@ -133,6 +120,7 @@ function Content({ s }: { s: Snapshot }) {
 
 export default function Flyout() {
   const s = useSnapshot();
+  useTheme(useSettings()?.theme);
   const ref = useRef<HTMLDivElement>(null);
 
   // Fit the window height to the content
