@@ -5,8 +5,15 @@
   --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
 }
 
+/* Dark mode is driven by a class on <html> (see theme.ts), not by the media query */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+}
+
+:root.dark {
+  color-scheme: dark;
 }
 
 body {

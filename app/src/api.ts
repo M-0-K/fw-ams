@@ -23,3 +23,20 @@ export function useSnapshot(): Snapshot | null {
 
   return snapshot;
 }
+
+/** Current settings, kept live through the backend's "settings" event */
+export function useSettings(): Settings | null {
+  const [settings, setLocal] = useState<Settings | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getSettings().then((s) => active && setLocal(s)).catch(() => {});
+    const unlisten = listen<Settings>("settings", (e) => active && setLocal(e.payload));
+    return () => {
+      active = false;
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  return settings;
+}
