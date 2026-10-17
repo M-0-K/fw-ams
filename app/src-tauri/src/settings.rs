@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use ts_rs::TS;
 
+/// Color scheme of all windows
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum Theme {
+    /// Follow the OS setting
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", default)]
 #[ts(export)]
@@ -13,6 +25,7 @@ pub struct Settings {
     pub autostart: bool,
     /// When started by autostart, stay in the tray
     pub start_minimized: bool,
+    pub theme: Theme,
     pub alerts: AlertSettings,
 }
 
@@ -22,6 +35,7 @@ impl Default for Settings {
             poll_interval_ms: 2000,
             autostart: false,
             start_minimized: true,
+            theme: Theme::System,
             alerts: AlertSettings::default(),
         }
     }
@@ -34,6 +48,8 @@ impl Settings {
     pub fn sanitized(mut self) -> Self {
         self.poll_interval_ms = self.poll_interval_ms.clamp(Self::MIN_POLL_MS, Self::MAX_POLL_MS);
         self.alerts.battery_low_percent = self.alerts.battery_low_percent.clamp(1, 99);
+        self.alerts.weak_charger_watts = self.alerts.weak_charger_watts.clamp(5, 240);
+        self.alerts.high_temp_celsius = self.alerts.high_temp_celsius.clamp(50, 110);
         self
     }
 }

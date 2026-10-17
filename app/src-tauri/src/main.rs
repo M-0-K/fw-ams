@@ -31,10 +31,24 @@ fn get_snapshot(state: State<SharedState>) -> Option<Snapshot> {
     state.latest.read().unwrap().clone()
 }
 
+/// Open the main window, optionally jumping to the details of one slot
 #[tauri::command]
-fn show_main(app: AppHandle) {
+fn show_main(app: AppHandle, slot: Option<u8>) {
     flyout::hide(&app);
     show_main_window(&app);
+    if let Some(slot) = slot {
+        let _ = app.emit("navigate", slot);
+    }
+}
+
+#[tauri::command]
+fn test_notification(app: AppHandle) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title("fw-ams")
+        .body("Benachrichtigungen funktionieren.")
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -48,6 +62,8 @@ fn set_settings(app: AppHandle, state: State<SharedState>, settings: Settings) -
     settings::save(&state.settings_path, &settings).map_err(|e| e.to_string())?;
     apply_autostart(&app, settings.autostart);
     *state.settings.write().unwrap() = settings.clone();
+    // Lets the flyout and main window pick up the new theme right away
+    let _ = app.emit("settings", &settings);
     Ok(settings)
 }
 
@@ -167,7 +183,11 @@ fn main() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, get_settings, set_settings, show_main])
+        .invoke_handler(tauri::generate_handler![get_snapshot, get_settings,
+            set_settings,
+            show_main,
+            test_notification
+        ])
         .run(tauri::generate_context!())
         .expect("error while running fw-ams");
 }

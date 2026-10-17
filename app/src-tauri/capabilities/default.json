@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permissions for the main window and the tray flyout",
   "windows": ["main", "flyout"],
-  "permissions": ["core:default", "core:window:allow-set-size"]
+  "permissions": ["core:default", "core:window:allow-set-size", "core:window:allow-set-theme"]
 }

@@ -4,7 +4,7 @@ import LaptopDiagram from "../components/LaptopDiagram";
 import Stat from "../components/Stat";
 import { chargeStateLabel, duration, num, signed, tempColor } from "../format";
 
-export default function Overview({ s, onOpenPorts }: { s: Snapshot; onOpenPorts: () => void }) {
+export default function Overview({ s, onOpenPorts }: { s: Snapshot; onOpenPorts: (slot?: number) => void }) {
   const b = s.battery;
   const chargerPort = s.ports.find((p) => p.index === s.charger.port);
   const hottest = s.thermal?.sensors
@@ -83,7 +83,7 @@ export default function Overview({ s, onOpenPorts }: { s: Snapshot; onOpenPorts:
       <section className="card md:col-span-2">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="font-semibold">Expansion Cards</h2>
-          <button onClick={onOpenPorts} className="text-sm text-accent hover:underline">
+          <button onClick={() => onOpenPorts()} className="text-sm text-accent hover:underline">
             Details →
           </button>
         </div>
