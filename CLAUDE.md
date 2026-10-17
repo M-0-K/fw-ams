@@ -14,21 +14,33 @@ Mehr Nutzerdoku: README.md. Hier nur, was man zum schnellen Weiterentwickeln bra
 | `.../cards/{detect,catalog}.rs` | Kartenerkennung (USB-IDs, PD-Heuristik) |
 | `.../alerts.rs` | Benachrichtigungsregeln mit Hysterese + `AlertSettings` |
 | `.../mock.rs` | Aufgezeichnete Testdaten (`--mock`, Testfixture) |
+| `.../saver.rs` | Zustandsmaschine Auto-Sparmodus (niedriger Akku) |
+| `crates/fw-ams-tuner/src/engine.rs` | CPU-Tuner: Profil anwenden, rücklesen, Firmware-Override erkennen/wiederherstellen, Ereignislog |
+| `.../{family,pm_table}.rs` | SMU-Message-IDs, Mailbox, PM-Tabellen-Offsets je CPU (aus RyzenAdj) |
+| `.../smu/{pawnio,mock}.rs` | SMU-Backends: PawnIO + RyzenSMU-Modul (Windows), Simulation |
+| `.../{winpower,oscpu}.rs` | Windows-Energieplan/-modus, PDH-Takt/-Last |
+| `.../{protocol,client}.rs` | Named Pipe App ↔ Dienst (JSON-Zeilen), Dienststatus, UAC-Start |
+| `crates/fw-ams-service` | Windows-Dienst (LocalSystem), Pipe-Server, install/uninstall/console |
 | `crates/fw-ams-cli` | CLI zum Debuggen (`status`, `cards`, `usb`, `dump`, `--mock`) |
-| `app/src-tauri/src/main.rs` | Commands, Poller-Thread, Fenster-Events |
+| `app/src-tauri/src/main.rs` | Commands, Poller-Thread, Tuner-Thread, Fenster-Events |
+| `.../charge.rs`, `tuner.rs` | Ladelimit/-strom mit Statusmodell; Tuner-Anbindung, Verlauf (10 min) |
 | `.../tray.rs`, `flyout.rs` | Tray-Icon, Hover-Flyout (Breite `WIDTH` hier **und** in `Flyout.tsx`) |
 | `.../settings.rs` | `Settings` (+ `Theme`), JSON in App-Config-Dir, `sanitized()` klemmt Werte |
 | `app/src/api.ts` | `useSnapshot`, `useSettings`, Settings-Commands |
 | `app/src/slots.ts` | `describe`, `flow`, `slotRows`: gemeinsam für Flyout, Diagramm, Ports |
 | `app/src/theme.ts` | Dark Mode (`.dark` auf `<html>`, Titelleiste, localStorage-Cache) |
 | `app/src/format.ts` | Zahlenformat (`num`, `signed`), Labels, `cardStyle` |
-| `app/src/pages/*`, `components/*` | Seiten (Übersicht, Ports, Thermik, System, Einstellungen), `LaptopDiagram`, `BatteryRing`, `Stat` |
+| `app/src/pages/*`, `components/*` | Seiten (Übersicht, Ports, Thermik, System, Erweitert, Einstellungen), `LaptopDiagram`, `BatteryRing`, `Stat`, `LineChart`, `TuneTable`, `PowerBreakdown`, `controls` |
 | `app/src/bindings/` | **generiert**, nie von Hand ändern |
 
 ## Datenfluss
 `Collector` → Poller-Thread (`main.rs`) → Tray + Alerts + Event `snapshot` → `useSnapshot()`.
-Weitere Events: `settings` (nach `set_settings`, für Live-Theme), `navigate` (Slotnummer, vom Flyout).
-Commands: `get_snapshot`, `get_settings`, `set_settings`, `show_main(slot?)`, `test_notification`.
+Weitere Events: `settings` (nach `set_settings`, für Live-Theme), `navigate` (Slotnummer, vom Flyout),
+`charge` (Ladesteuerung), `tuner` (1 Hz: `TunerView` + `HistorySample`).
+Commands: `get_snapshot`, `get_settings`, `set_settings`, `show_main(slot?)`, `test_notification`,
+`get_charge_control`, `charge_full_once`, `get_tuner`, `get_history`, `tuner_set_config`, `tuner_reset`,
+`tuner_install`, `tuner_uninstall`, `set_power_mode`, `open_pawnio_site`.
+Tuner: App → Named Pipe `\\.\pipe\fw-ams-tuner` → `fw-ams-service` → `Engine` → PawnIO. Mit `--mock` läuft die Engine simuliert in der App.
 
 ## Befehle
 - `cargo test --workspace`: Tests **und** TS-Bindings neu erzeugen (`.cargo/config.toml` setzt `TS_RS_EXPORT_DIR`)
@@ -36,11 +48,17 @@ Commands: `get_snapshot`, `get_settings`, `set_settings`, `show_main(slot?)`, `t
 - `cd app && npm run tauri dev -- -- --mock [--flyout]`: App mit Mockdaten, Flyout sofort offen
 - App-Flags: `--mock` / `FW_AMS_MOCK`, `--flyout`, `--minimized`
 - Mock ist ein FW13 AI 300: USB-C links hinten (Ladegerät), USB-A links vorne, HDMI rechts vorne, rechts hinten leer
+- Mock-Tuner: Strix-PM-Tabelle, Firmware setzt STAPM alle 90 s zurück, Fast-Limit auf 35 W gedeckelt (testet „wiederhergestellt“/„begrenzt“)
+- `cargo build -p fw-ams-service` + `scripts/fetch-pawnio-module.ps1`: Dienst und RyzenSMU-Modul für die Entwicklung
+- `fw-ams smu info|dump`: SMU/PM-Tabelle prüfen; `target\debug\fw-ams-service.exe console` (Admin) zum Debuggen
+- `cd app && npm run bundle:windows`: Installer inkl. Dienst (Sidecar) und RyzenSMU.bin
 
 ## Rezepte
 - **Neue Einstellung:** Feld in `settings.rs` (bzw. `AlertSettings`) + Default + ggf. `sanitized()` → `cargo test` → UI in `pages/Settings.tsx` (`Row` + `Switch`/`NumberInput`; speichert automatisch).
 - **Neuer Kartentyp:** `CardKind` (model.rs) + `cards/catalog.rs` + `cardStyle` in `format.ts`.
 - **Slot kalibrieren:** `fw-ams usb` ausführen, Root-Port in `cards/slots.rs` eintragen.
+- **Neuer Tuning-Parameter:** `ParamId` + `TuneProfile` (types.rs) + `family::specs` + `Engine::read_actual`/`write` → UI-Text in `paramMeta` (format.ts).
+- **Neue CPU-Familie:** `family.rs` (Message-IDs, Codename) + `pm_table.rs` (Layout je Tabellenversion, mit `fw-ams smu dump` prüfen).
 - **Neue Fenster-API im Frontend:** Permission in `app/src-tauri/capabilities/default.json` ergänzen, sonst schlägt der Aufruf still fehl.
 
 ## Stolpersteine
@@ -50,4 +68,7 @@ Commands: `get_snapshot`, `get_settings`, `set_settings`, `show_main(slot?)`, `t
 - React 19: `useRef` braucht ein Argument (`useRef<T | undefined>(undefined)`).
 - Zahlen im UI immer über `num()`/`signed()` (de-DE, `n/v` bei fehlenden Werten).
 - PD-Port-Index ist nicht die Slotnummer: Zuordnung steht in `cards/slots.rs`.
-- Commits nur auf Wunsch des Nutzers.
+- Dienst nimmt nur typisierte, geklemmte Werte an (`Engine::sanitize`), nie rohe SMU-Befehle. Pipe-DACL: SYSTEM, Admins, installierender Nutzer.
+- Gerät des Entwicklers ist Krackan Point (Ryzen AI 7 350, PM-Tabelle 0x650005): Kern-Offsets unbekannt, daher Kernwerte aus PDH.
+- Curve Optimizer ist nicht rücklesbar (Status „gesendet, nicht rücklesbar“); nach Absturz im Testlauf nie automatisch anwenden.
+- Commits: auf Feature-Branch, je Phase/kleinem Schritt (Wunsch des Nutzers).

@@ -2,3 +2,7 @@
 node_modules/
 dist/
 *.log
+# Fetched/built for the Windows bundle (scripts/prepare-windows-bundle.ps1)
+app/src-tauri/binaries/
+app/src-tauri/resources/RyzenSMU.bin
+app/src-tauri/resources/PawnIO.Modules-COPYING.txt

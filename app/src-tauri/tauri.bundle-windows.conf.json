@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/prepare-windows-bundle.ps1"
+  },
+  "bundle": {
+    "externalBin": ["binaries/fw-ams-service"],
+    "resources": {
+      "resources/RyzenSMU.bin": "resources/RyzenSMU.bin",
+      "resources/PawnIO.Modules-COPYING.txt": "resources/PawnIO.Modules-COPYING.txt"
+    }
+  }
+}

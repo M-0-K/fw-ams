@@ -8,6 +8,8 @@ Expansion-Card-Erkennung für Framework Laptops, unter Windows und Linux.
 | Pfad | Inhalt |
 |---|---|
 | `crates/fw-ams-core` | Hardware-Zugriff (`framework_lib`, `nusb`, sysfs) und Datenmodell |
+| `crates/fw-ams-tuner` | CPU-Tuning: SMU über PawnIO, Windows-Energieplan, Engine mit Statusmodell |
+| `crates/fw-ams-service` | Hilfsdienst (Windows, LocalSystem) für das CPU-Tuning |
 | `crates/fw-ams-cli`  | CLI `fw-ams` zum Debuggen und Kalibrieren |
 | `app/`               | Tauri-v2-App (Tray, UI) |
 
@@ -18,6 +20,8 @@ cargo run -p fw-ams-cli -- status   # Akku, Ladegerät, Thermik
 cargo run -p fw-ams-cli -- cards    # Expansion Cards je Slot
 cargo run -p fw-ams-cli -- usb      # USB-Geräte mit ACPI-Root-Port
 cargo run -p fw-ams-cli -- dump     # Snapshot als JSON
+cargo run -p fw-ams-cli -- smu info # CPU, SMU-Version, PM-Tabelle (über Dienst oder als Admin)
+cargo run -p fw-ams-cli -- smu dump # PM-Tabelle roh, zum Zuordnen unbekannter Offsets
 ```
 
 `--mock` nutzt aufgezeichnete Daten statt Hardware.
@@ -44,6 +48,30 @@ libudev-dev libusb-1.0-0-dev`.
 - **Windows:** Framework-EC-Treiber (im Framework Driver Bundle, aktuelles BIOS). Keine Admin-Rechte nötig.
 - **Linux:** Kernel-Modul `cros_ec_lpcs`, Zugriff auf `/dev/cros_ec` über `packaging/linux/99-fw-ams.rules`.
   Ohne EC-Zugriff werden sysfs/hwmon-Werte verwendet.
+
+## Erweitert: CPU-Tuning und Akkupflege (Windows)
+
+Die Seite „Erweitert“ zeigt live Leistungsaufnahme, Temperatur und Takt und stellt ein:
+Powerlimits (STAPM, PPT Fast/Slow), Temperaturgrenze (Tctl), Curve Optimizer, max. Takt,
+Boost, EPP, Ladelimit, Ladestrom. Jeder Wert zeigt **Standard, Eingestellt, Gesendet, Ist
+(Hardware)** und einen Status (übernommen, begrenzt, abgelehnt, von Firmware überschrieben und
+wiederhergestellt …). Ohne Treiber funktionieren Windows-Energiemodus, Live-Takt/-Last und
+Akkupflege.
+
+Für Powerlimits, Tctl und Curve Optimizer:
+1. **PawnIO** installieren (https://pawnio.eu, signierter Nachfolger von WinRing0).
+2. In der App unter Erweitert „Hilfsdienst installieren“ (eine UAC-Abfrage). Der Dienst liegt in
+   `%ProgramFiles%\fw-ams-tuner`, Konfiguration und Log in `%ProgramData%\fw-ams`.
+
+Entwicklung: `scripts/fetch-pawnio-module.ps1` lädt das signierte `RyzenSMU.bin`
+(PawnIO.Modules, LGPL-2.1), `cargo build -p fw-ams-service` baut den Dienst neben die App.
+Installer mit Dienst: `cd app && npm run bundle:windows`. Zum Debuggen in einer Admin-Konsole:
+`target\debug\fw-ams-service.exe console`.
+
+Unterstützt: Ryzen AI 300 (Strix Point, Krackan Point), Ryzen AI Max (Strix Halo). Message-IDs
+und Tabellen-Offsets stammen aus RyzenAdj. Für Krackan Point (z. B. Ryzen AI 7 350) sind Limits
+und Tctl bekannt, Werte pro Kern kommen aus den Windows-Leistungsindikatoren. Alle SMU-Werte
+sind flüchtig: ein Neustart setzt sie zurück. Linux: siehe `docs/linux-advanced.md`.
 
 ## Kalibrierung der Slots
 

@@ -59,6 +59,24 @@ fn info(use_mock: bool) -> Result<(), String> {
         id.model,
         family::family_from_cpuid(id.family, id.model)
     );
+    println!(
+        "Energiemodus  {}",
+        fw_ams_tuner::winpower::power_mode()
+            .map(|m| format!("{m:?}"))
+            .unwrap_or("n/v".into())
+    );
+    if let Some(mut os) = fw_ams_tuner::oscpu::OsCpuMonitor::new() {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let s = os.sample();
+        let max = s.thread_mhz.iter().copied().fold(0.0f32, f32::max);
+        println!(
+            "Windows (PDH) Last {:.0} %, Basis {:.0} MHz, schnellster Thread {:.0} MHz ({} Threads)",
+            s.usage_percent.unwrap_or(f32::NAN),
+            s.base_mhz.unwrap_or(f32::NAN),
+            max,
+            s.thread_mhz.len()
+        );
+    }
     match backend(use_mock) {
         Ok(mut b) => {
             let code = b.code_name().ok();
