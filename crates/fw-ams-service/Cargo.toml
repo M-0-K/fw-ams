@@ -1,0 +1,27 @@
+[package]
+name = "fw-ams-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Privileged helper service for fw-ams CPU tuning"
+
+[[bin]]
+name = "fw-ams-service"
+path = "src/main.rs"
+
+[dependencies]
+fw-ams-tuner.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+] }

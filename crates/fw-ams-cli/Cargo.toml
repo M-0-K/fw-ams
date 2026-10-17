@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 fw-ams-core.workspace = true
+fw-ams-tuner.workspace = true
 framework_lib.workspace = true
 nusb.workspace = true
 serde_json.workspace = true

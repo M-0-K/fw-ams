@@ -1,5 +1,6 @@
 //! fw-ams CLI – debugging and hardware calibration tool.
 
+mod smu;
 mod spike;
 
 use fw_ams_core::model::{Confidence, Severity, Snapshot};
@@ -13,7 +14,9 @@ Verwendung:
   fw-ams cards  [--mock]   Expansion Cards je Slot
   fw-ams usb               USB-Geräte mit Root-Port (zur Kalibrierung)
   fw-ams dump   [--mock]   kompletter Snapshot als JSON
-  fw-ams spike             EC-Rohdaten als JSON";
+  fw-ams spike             EC-Rohdaten als JSON
+  fw-ams smu info [--mock] CPU, SMU-Version, PM-Tabelle (Tuning-Diagnose)
+  fw-ams smu dump [--mock] PM-Tabelle roh als JSON (Offsets zuordnen)";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,6 +34,7 @@ fn main() {
         Some("usb") => print_usb(),
         Some("dump") => println!("{}", serde_json::to_string_pretty(&snapshot()).unwrap()),
         Some("spike") => spike::run(),
+        Some("smu") => smu::run(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
