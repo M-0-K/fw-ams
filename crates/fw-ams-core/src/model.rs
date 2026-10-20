@@ -355,6 +355,8 @@ pub enum Confidence {
     Certain,
     /// Inferred from PD state or an uncalibrated port
     Likely,
+    /// Not reporting right now; shown from the card memory (passive cards without a device)
+    Remembered,
     Unknown,
 }
 
@@ -368,6 +370,9 @@ pub struct Card {
     /// What this card type does / which protocols it uses
     pub features: Vec<String>,
     pub usb_id: Option<String>,
+    /// Set when the card comes from the card memory: Unix ms it was last detected for sure
+    #[ts(type = "number | null")]
+    pub remembered_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

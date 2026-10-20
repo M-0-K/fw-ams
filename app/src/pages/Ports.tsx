@@ -6,7 +6,12 @@ import LaptopDiagram from "../components/LaptopDiagram";
 import { cardStyle, num } from "../format";
 import { describe, flow } from "../slots";
 
-const confidenceLabel = { certain: "sicher erkannt", likely: "vermutet", unknown: "unklar" } as const;
+const confidenceLabel = {
+  certain: "sicher erkannt",
+  likely: "vermutet",
+  remembered: "gemerkt – meldet sich gerade nicht",
+  unknown: "unklar",
+} as const;
 
 const partnerLabel = {
   nothing: "nichts",

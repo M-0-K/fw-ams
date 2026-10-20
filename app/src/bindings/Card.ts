@@ -6,4 +6,8 @@ export type Card = { kind: CardKind, confidence: Confidence, name: string,
 /**
  * What this card type does / which protocols it uses
  */
-features: Array<string>, usbId: string | null, };
+features: Array<string>, usbId: string | null, 
+/**
+ * Set when the card comes from the card memory: Unix ms it was last detected for sure
+ */
+rememberedMs: number | null, };

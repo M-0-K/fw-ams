@@ -2,4 +2,5 @@
 
 pub mod catalog;
 pub mod detect;
+pub mod memory;
 pub mod slots;

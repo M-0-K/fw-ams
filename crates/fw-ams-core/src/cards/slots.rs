@@ -121,7 +121,7 @@ pub fn pd_port_location(model: Model, port: u8) -> Location {
 
 /// AMD Laptop 13 "far" (rear) slots draw more standby power with a USB-A card (Framework KB:
 /// ~430 mW retimer power vs. 35–120 mW in the front slots)
-pub fn usb_a_standby_penalty(model: Model, def: &SlotDef) -> bool {
+pub fn usb_a_standby_penalty(model: Model, location: &Location) -> bool {
     matches!(model, Model::Laptop13AmdAi300 | Model::Laptop13Amd7040)
-        && def.location.position == Position::Back
+        && location.position == Position::Back
 }
