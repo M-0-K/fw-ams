@@ -7,7 +7,9 @@
 //! Usage:
 //!   fw-ams-service install [--user-sid S-1-5-…] [--module RyzenSMU.bin]
 //!                                                 copy to Program Files, register, start
-//!   fw-ams-service uninstall                      stop, unregister, remove files
+//!   fw-ams-service uninstall [--purge]            stop, unregister, remove files, restore the
+//!                                                 Windows power plan; --purge also deletes
+//!                                                 profiles and logs in %ProgramData%w-ams
 //!   fw-ams-service console                        run in the foreground (debugging, needs admin)
 //!   fw-ams-service run                            entry point used by the service manager
 
@@ -21,27 +23,28 @@ mod service;
 #[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let purge = args.iter().any(|a| a == "--purge");
     if matches!(args.first().map(String::as_str), Some("install" | "uninstall")) {
         // Elevated runs have no visible console: errors go to service.log
-        logger::init(false);
+        logger::init(false, !purge);
     }
     let code = match args.first().map(String::as_str) {
         Some("install") => {
             let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
             report(service::install(value("--user-sid"), value("--module").map(Into::into)))
         }
-        Some("uninstall") => report(service::uninstall()),
+        Some("uninstall") => report(service::uninstall(purge)),
         Some("console") => {
-            logger::init(true);
+            logger::init(true, true);
             server::run_console();
             0
         }
         Some("run") => {
-            logger::init(false);
+            logger::init(false, true);
             report(service::run_dispatcher())
         }
         _ => {
-            eprintln!("Usage: fw-ams-service install [--user-sid SID] [--module PATH] | uninstall | console | run");
+            eprintln!("Usage: fw-ams-service install [--user-sid SID] [--module PATH] | uninstall [--purge] | console | run");
             2
         }
     };

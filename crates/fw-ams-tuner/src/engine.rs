@@ -9,6 +9,11 @@
 //! - read back differs right after writing (twice) → `Limited` (BIOS/firmware clamps it)
 //! - was `Applied`, later differs → firmware overwrote it (e.g. charger plugged in): the new
 //!   value becomes the default for this power source, then it is restored (`restored += 1`)
+//!
+//! SMU values are volatile (a reboot resets them). Windows power plan values are not: before
+//! the first write to a plan value (per AC/DC index) the original is stored in
+//! `plan_originals.json`, independent of the boot, and written back on reset, when the
+//! profile no longer sets it, after a boot without "apply on boot", and on uninstall.
 
 use crate::family::{self, encode_arg, SmuMessages};
 use crate::pm_table;
@@ -16,7 +21,7 @@ use crate::smu::{format_smu_version, SmuBackend, SmuError};
 use crate::types::*;
 use crate::winpower::PowerPlan;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const MAX_EVENTS: usize = 200;
@@ -30,7 +35,12 @@ const LIMITED_RETRY: Duration = Duration::from_secs(60);
 
 const CONFIG_FILE: &str = "tuner.json";
 const DEFAULTS_FILE: &str = "defaults.json";
+const PLAN_ORIGINALS_FILE: &str = "plan_originals.json";
 const CO_MARKER: &str = "co_trial";
+/// Everything the engine stores, for a full cleanup
+pub const STORE_FILES: [&str; 4] = [CONFIG_FILE, DEFAULTS_FILE, PLAN_ORIGINALS_FILE, CO_MARKER];
+/// Power plan values are integers
+const PLAN_TOLERANCE: f32 = 0.5;
 
 #[derive(Default)]
 struct Runtime {
@@ -56,6 +66,8 @@ pub struct Engine {
     specs: Vec<ParamSpec>,
     rt: BTreeMap<ParamId, Runtime>,
     defaults: HashMap<(ParamId, PowerSource), f32>,
+    /// Windows power plan values before fw-ams changed them, per AC/DC index
+    plan_originals: HashMap<(ParamId, PowerSource), f32>,
     config: TunerConfig,
     saver: bool,
     power_source: PowerSource,
@@ -86,6 +98,47 @@ pub fn boot_id() -> u64 {
     {
         0
     }
+}
+
+fn source_label(src: PowerSource) -> &'static str {
+    match src {
+        PowerSource::Ac => "Netzteil",
+        PowerSource::Battery => "Akku",
+    }
+}
+
+fn other(src: PowerSource) -> PowerSource {
+    match src {
+        PowerSource::Ac => PowerSource::Battery,
+        PowerSource::Battery => PowerSource::Ac,
+    }
+}
+
+fn load_plan_originals(dir: &Path) -> HashMap<(ParamId, PowerSource), f32> {
+    std::fs::read_to_string(dir.join(PLAN_ORIGINALS_FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<(ParamId, PowerSource, f32)>>(&s).ok())
+        .map(|v| v.into_iter().map(|(p, s, v)| ((p, s), v)).collect())
+        .unwrap_or_default()
+}
+
+/// Write the stored power plan originals back and drop the file. Used by the service's
+/// uninstall, when no engine is running. Returns how many values were restored.
+pub fn restore_plan_originals(dir: &Path, plan: &mut dyn PowerPlan) -> Result<usize, String> {
+    let originals = load_plan_originals(dir);
+    let errors: Vec<String> = originals
+        .iter()
+        .filter_map(|((id, src), v)| {
+            plan.write(*id, *src == PowerSource::Ac, *v)
+                .err()
+                .map(|e| format!("{} ({}): {e}", label(*id), source_label(*src)))
+        })
+        .collect();
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    let _ = std::fs::remove_file(dir.join(PLAN_ORIGINALS_FILE));
+    Ok(originals.len())
 }
 
 fn label(id: ParamId) -> &'static str {
@@ -183,6 +236,7 @@ impl Engine {
             specs,
             rt: ParamId::ALL.iter().map(|id| (*id, Runtime::default())).collect(),
             defaults: HashMap::new(),
+            plan_originals: HashMap::new(),
             config: TunerConfig::default(),
             saver: false,
             power_source: if on_ac { PowerSource::Ac } else { PowerSource::Battery },
@@ -239,6 +293,7 @@ impl Engine {
                     self.defaults = d.values.into_iter().map(|(p, s, v)| ((p, s), v)).collect();
                 }
             }
+            self.plan_originals = load_plan_originals(dir);
             if let Ok(marker) = std::fs::read_to_string(dir.join(CO_MARKER)) {
                 if marker.trim().parse::<u64>().ok() == Some(boot) {
                     // Service restarted during a trial: keep testing
@@ -266,6 +321,9 @@ impl Engine {
         self.observe_defaults();
         if same_boot || self.config.apply_on_boot {
             self.apply_active();
+        } else {
+            // Power plan values survive the reboot; without "apply on boot" they go back too
+            self.restore_plan();
         }
     }
 
@@ -343,6 +401,8 @@ impl Engine {
         self.persist_config();
         self.event(EventKind::Info, None, "Alle Werte auf Standard zurückgesetzt".into());
         self.apply_active();
+        // Anything left over, e.g. written by an older version for a profile now inactive
+        self.restore_plan();
     }
 
     /// Raw PM table for diagnostics
@@ -413,6 +473,11 @@ impl Engine {
     /// Remember what the firmware uses for every value we have not touched
     fn observe_defaults(&mut self) {
         for id in ParamId::ALL {
+            // After a reboot the plan still holds fw-ams values; the stored original is the default
+            if let Some(o) = self.plan_originals.get(&(id, self.power_source)).copied() {
+                self.defaults.insert((id, self.power_source), o);
+                continue;
+            }
             let untouched = self.rt[&id].state.as_ref().is_none_or(|s| s.sent.is_none());
             if untouched {
                 if let Some(v) = self.read_actual(id) {
@@ -445,29 +510,99 @@ impl Engine {
             match (desired, st.sent) {
                 (Some(v), sent) if sent != Some(v) || st.status == ParamStatus::Rejected => self.write(id, v),
                 (Some(_), _) => self.set_state(id, |s| s.desired = desired),
-                (None, Some(_)) => {
-                    // Back to default: write the firmware value we saw for this power source
-                    match self.defaults.get(&(id, self.power_source)).copied() {
-                        Some(d) => {
-                            self.write(id, d);
-                        }
-                        None => {}
+                (None, sent) => {
+                    // Back to default: SMU values get the firmware value seen for this power
+                    // source, plan values their stored original (also after a reboot)
+                    let restore = if id.is_smu() {
+                        sent.and(self.defaults.get(&(id, self.power_source)).copied())
+                    } else {
+                        self.plan_originals.get(&(id, self.power_source)).copied()
+                    };
+                    if let Some(d) = restore {
+                        self.write(id, d);
                     }
-                    self.set_state(id, |s| {
-                        s.desired = None;
-                        s.sent = None;
-                        s.status = ParamStatus::Default;
-                        s.restored = 0;
-                        s.error = None;
-                    });
-                    let rt = self.rt.get_mut(&id).unwrap();
-                    rt.confirmed = false;
-                    rt.attempts = 0;
+                    if sent.is_some() || restore.is_some() {
+                        self.set_state(id, |s| {
+                            s.desired = None;
+                            s.sent = None;
+                            s.status = ParamStatus::Default;
+                            s.restored = 0;
+                            s.error = None;
+                        });
+                        let rt = self.rt.get_mut(&id).unwrap();
+                        rt.confirmed = false;
+                        rt.attempts = 0;
+                    } else {
+                        self.set_state(id, |s| {
+                            s.desired = None;
+                            s.status = if spec.supported { ParamStatus::Default } else { ParamStatus::Unsupported };
+                        });
+                    }
                 }
-                (None, None) => self.set_state(id, |s| {
-                    s.desired = None;
-                    s.status = if spec.supported { ParamStatus::Default } else { ParamStatus::Unsupported };
-                }),
+            }
+        }
+        self.sync_inactive_plan();
+    }
+
+    /// The power plan keeps separate AC and DC values. The engine writes the active one while
+    /// running, so bring the other index in line with its profile (or its original) as well –
+    /// otherwise a value removed from the inactive profile would stay in Windows for good.
+    fn sync_inactive_plan(&mut self) {
+        let src = other(self.power_source);
+        // The saver profile only applies while it is active, which is never on AC
+        let slot = if src == PowerSource::Ac { ProfileSlot::Ac } else { ProfileSlot::Dc };
+        let profile = self.config.profile(slot).clone();
+        for id in ParamId::ALL.into_iter().filter(|id| !id.is_smu()) {
+            let Some(spec) = self.spec(id).filter(|s| s.supported).cloned() else { continue };
+            let want = profile
+                .get(id)
+                .map(|v| spec.clamp(v))
+                .or_else(|| self.plan_originals.get(&(id, src)).copied());
+            let Some(want) = want else { continue };
+            let ac = src == PowerSource::Ac;
+            if self.plan.read(id, ac).is_ok_and(|v| (v - want).abs() < PLAN_TOLERANCE) {
+                continue;
+            }
+            let what = format!("{} ({})", label(id), source_label(src));
+            match self.plan_write(id, src, want) {
+                Ok(()) => self.event(EventKind::Applied, Some(id), format!("{what} → {}", fmt_value(id, want))),
+                Err(e) => self.event(EventKind::Error, Some(id), format!("{what}: {e}")),
+            }
+        }
+    }
+
+    /// Write a power plan value, storing the original first. Writing the original back
+    /// forgets it, so a later change captures the then current Windows value again.
+    fn plan_write(&mut self, id: ParamId, src: PowerSource, v: f32) -> Result<(), String> {
+        let ac = src == PowerSource::Ac;
+        if !self.plan_originals.contains_key(&(id, src)) {
+            let current = self.plan.read(id, ac)?;
+            if (current - v).abs() >= PLAN_TOLERANCE {
+                self.plan_originals.insert((id, src), current);
+                self.persist_plan_originals();
+            }
+        }
+        self.plan.write(id, ac, v)?;
+        if self.plan_originals.get(&(id, src)).is_some_and(|o| (o - v).abs() < PLAN_TOLERANCE) {
+            self.plan_originals.remove(&(id, src));
+            self.persist_plan_originals();
+        }
+        Ok(())
+    }
+
+    /// Put every changed power plan value (AC and DC) back to its original
+    fn restore_plan(&mut self) {
+        let mut originals: Vec<_> = self.plan_originals.iter().map(|(k, v)| (*k, *v)).collect();
+        originals.sort_by_key(|((id, src), _)| (*id, *src == PowerSource::Ac));
+        for ((id, src), v) in originals {
+            let what = format!("{} ({})", label(id), source_label(src));
+            match self.plan_write(id, src, v) {
+                Ok(()) => self.event(
+                    EventKind::Info,
+                    Some(id),
+                    format!("{what} auf Windows-Wert {} zurückgesetzt", fmt_value(id, v)),
+                ),
+                Err(e) => self.event(EventKind::Error, Some(id), format!("{what}: {e}")),
             }
         }
     }
@@ -479,7 +614,6 @@ impl Engine {
     }
 
     fn write(&mut self, id: ParamId, v: f32) {
-        let ac = self.power_source == PowerSource::Ac;
         let result: Result<(), String> = if id.is_smu() {
             match (self.smu.as_mut(), self.msgs.and_then(|m| m.message(id).map(|msg| (m.mailbox, msg)))) {
                 (Some(smu), Some((mb, msg))) => smu
@@ -489,7 +623,7 @@ impl Engine {
                 _ => Err("Kein SMU-Zugriff".into()),
             }
         } else {
-            self.plan.write(id, ac, v)
+            self.plan_write(id, self.power_source, v)
         };
         let rt = self.rt.get_mut(&id).unwrap();
         rt.last_write = Some(Instant::now());
@@ -534,7 +668,8 @@ impl Engine {
             }
             let st = self.rt[&id].state.clone().unwrap();
             let Some(sent) = st.sent else {
-                if let Some(a) = actual {
+                let original = self.plan_originals.get(&(id, self.power_source)).copied();
+                if let Some(a) = original.or(actual) {
                     self.defaults.insert((id, self.power_source), a);
                     self.set_state(id, |s| s.default = Some(a));
                 }
@@ -666,6 +801,27 @@ impl Engine {
         }
     }
 
+    fn persist_plan_originals(&self) {
+        let Some(dir) = &self.store else { return };
+        let path = dir.join(PLAN_ORIGINALS_FILE);
+        let values: Vec<(ParamId, PowerSource, f32)> =
+            self.plan_originals.iter().map(|((p, s), v)| (*p, *s, *v)).collect();
+        let result = if values.is_empty() {
+            match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        } else {
+            let _ = std::fs::create_dir_all(dir);
+            serde_json::to_string(&values)
+                .map_err(std::io::Error::other)
+                .and_then(|s| std::fs::write(&path, s))
+        };
+        if let Err(e) = result {
+            log::warn!("plan originals not saved: {e}");
+        }
+    }
+
     fn persist_defaults(&self) {
         if let Some(dir) = &self.store {
             let d = StoredDefaults {
@@ -791,6 +947,83 @@ mod tests {
         let p = param(&e, ParamId::StapmW);
         assert_eq!(p.status, ParamStatus::Default);
         assert_eq!(p.actual, Some(28.0));
+    }
+
+    /// Power plan shared between engines, like the real one that survives a service restart
+    #[derive(Clone, Default)]
+    struct SharedPlan(std::sync::Arc<std::sync::Mutex<MockPowerPlan>>);
+
+    impl PowerPlan for SharedPlan {
+        fn read(&mut self, id: ParamId, ac: bool) -> Result<f32, String> {
+            self.0.lock().unwrap().read(id, ac)
+        }
+        fn write(&mut self, id: ParamId, ac: bool, value: f32) -> Result<(), String> {
+            self.0.lock().unwrap().write(id, ac, value)
+        }
+    }
+
+    fn engine_with(plan: &SharedPlan, store: Option<PathBuf>) -> Engine {
+        let mut e = Engine::new(Ok(Box::new(MockSmu::default())), Box::new(plan.clone()), store, true);
+        e.start();
+        e
+    }
+
+    fn temp_store(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fw-ams-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn inactive_plan_index_follows_profile_and_reset() {
+        let mut plan = SharedPlan::default();
+        let mut e = engine_with(&plan, None);
+        let mut cfg = e.config().clone();
+        cfg.dc.epp = Some(80.0);
+        e.set_config(cfg);
+        // On AC, but the DC index of the power plan is written right away
+        assert_eq!(plan.read(ParamId::Epp, false), Ok(80.0));
+        assert_eq!(plan.read(ParamId::Epp, true), Ok(33.0));
+
+        // Removing the value from the inactive profile restores the Windows value
+        let mut cfg = e.config().clone();
+        cfg.dc.epp = None;
+        e.set_config(cfg);
+        assert_eq!(plan.read(ParamId::Epp, false), Ok(50.0));
+
+        let mut cfg = e.config().clone();
+        cfg.ac.epp = Some(10.0);
+        cfg.dc.boost = Some(0.0);
+        e.set_config(cfg);
+        e.reset();
+        assert_eq!(plan.read(ParamId::Epp, true), Ok(33.0));
+        assert_eq!(plan.read(ParamId::Boost, false), Ok(2.0));
+    }
+
+    #[test]
+    fn plan_originals_survive_restart_and_uninstall() {
+        let dir = temp_store("originals");
+        let mut plan = SharedPlan::default();
+        let mut e = engine_with(&plan, Some(dir.clone()));
+        let mut cfg = e.config().clone();
+        cfg.ac.epp = Some(10.0);
+        cfg.apply_on_boot = false;
+        e.set_config(cfg);
+        assert_eq!(plan.read(ParamId::Epp, true), Ok(10.0));
+        drop(e);
+
+        // Service restart: the default shown is the Windows value, not the one fw-ams wrote
+        let mut e = engine_with(&plan, Some(dir.clone()));
+        e.tick(Some(true));
+        assert_eq!(param(&e, ParamId::Epp).default, Some(33.0));
+        drop(e);
+
+        // Uninstall without a running engine
+        plan.write(ParamId::Epp, true, 10.0).unwrap();
+        assert_eq!(restore_plan_originals(&dir, &mut plan), Ok(1));
+        assert_eq!(plan.read(ParamId::Epp, true), Ok(33.0));
+        assert_eq!(restore_plan_originals(&dir, &mut plan), Ok(0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

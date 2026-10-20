@@ -1,8 +1,10 @@
 //! Service registration and the service control handler.
 
-use crate::logger::data_dir;
+use crate::logger::{data_dir, LOG_FILE};
 use crate::server::{self, ServiceConfig, SERVICE_CONFIG};
+use fw_ams_tuner::engine::{restore_plan_originals, STORE_FILES};
 use fw_ams_tuner::protocol::{SERVICE_DISPLAY_NAME, SERVICE_NAME};
+use fw_ams_tuner::winpower::WindowsPowerPlan;
 use fw_ams_tuner::smu::pawnio::{find_module, MODULE_FILE};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -115,7 +117,9 @@ pub fn install(user_sid: Option<String>, module: Option<PathBuf>) -> Result<(), 
     Ok(())
 }
 
-pub fn uninstall() -> Result<(), String> {
+/// Stop and remove the service. Power plan values fw-ams changed go back to their Windows
+/// originals (SMU values reset on reboot anyway). `purge` also deletes profiles and logs.
+pub fn uninstall(purge: bool) -> Result<(), String> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(err("Dienstverwaltung (Admin-Rechte?)"))?;
     stop_and_delete(&manager)?;
@@ -123,7 +127,20 @@ pub fn uninstall() -> Result<(), String> {
     let _ = std::fs::remove_file(dir.join(EXE_NAME));
     let _ = std::fs::remove_file(dir.join(MODULE_FILE));
     let _ = std::fs::remove_dir(&dir);
-    Ok(())
+
+    let data = data_dir();
+    let restored = restore_plan_originals(&data, &mut WindowsPowerPlan);
+    match &restored {
+        Ok(n) => log::info!("uninstall: {n} power plan values restored"),
+        Err(e) => log::error!("uninstall: power plan not restored: {e}"),
+    }
+    if purge {
+        for f in STORE_FILES.iter().copied().chain([SERVICE_CONFIG, LOG_FILE]) {
+            let _ = std::fs::remove_file(data.join(f));
+        }
+        let _ = std::fs::remove_dir(&data);
+    }
+    restored.map(|_| ()).map_err(|e| format!("Energieplan nicht vollständig wiederhergestellt: {e}"))
 }
 
 define_windows_service!(ffi_service_main, service_main);

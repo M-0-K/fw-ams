@@ -4,6 +4,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+pub const LOG_FILE: &str = "service.log";
+
 pub fn data_dir() -> PathBuf {
     std::env::var_os("ProgramData")
         .map(PathBuf::from)
@@ -42,14 +44,19 @@ impl log::Log for FileLogger {
     fn flush(&self) {}
 }
 
-pub fn init(console: bool) {
+/// `file: false` logs to the console only (uninstall --purge deletes the log file)
+pub fn init(console: bool, file: bool) {
     let dir = data_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("service.log");
+    let path = dir.join(LOG_FILE);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
         let _ = std::fs::remove_file(&path);
     }
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
+    let file = file
+        .then(|| {
+            let _ = std::fs::create_dir_all(&dir);
+            std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+        })
+        .flatten();
     let logger = Box::leak(Box::new(FileLogger {
         file: Mutex::new(file),
         console,
