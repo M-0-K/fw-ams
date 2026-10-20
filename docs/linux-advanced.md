@@ -12,7 +12,7 @@ Protokoll und UI sind plattformneutral, nur die Backends fehlen.
 | Statusmodell (Standard/Gesendet/Ist/Status), Override-Erkennung, Ereignislog, CO-Testlauf | `crates/fw-ams-tuner/src/engine.rs` | keiner |
 | PM-Tabellen-Parser, Message-IDs je CPU-Familie | `pm_table.rs`, `family.rs` | keiner |
 | Pipe-Protokoll (JSON-Zeilen) | `protocol.rs` | Transport tauschen (Unix-Socket) |
-| UI inkl. Diagramme | `app/src/pages/Advanced.tsx` | keiner |
+| UI inkl. Diagramme | `app/src/pages/Advanced.tsx`, `app/src/pages/advanced/*` | keiner |
 | Akku-Warnstufen, Sparmodus-Zustandsmaschine | `fw-ams-core/src/{alerts,saver}.rs` | keiner |
 | Ladelimit über den EC | `fw-ams-core/src/source/ec.rs` | läuft schon, wenn `/dev/cros_ec` zugänglich ist (udev-Regel) |
 
