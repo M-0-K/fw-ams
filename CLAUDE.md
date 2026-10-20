@@ -12,34 +12,39 @@ Mehr Nutzerdoku: README.md. Hier nur, was man zum schnellen Weiterentwickeln bra
 | `.../source/{ec,usb,linux,os_battery}.rs` | Hardware-Zugriff (framework_lib, nusb, sysfs) |
 | `.../cards/slots.rs` | Slot-Layout je Modell, Fähigkeiten, kalibrierte USB-Root-Ports |
 | `.../cards/{detect,catalog}.rs` | Kartenerkennung (USB-IDs, PD-Heuristik) |
+| `.../cards/memory.rs` | Kartengedächtnis: merkt sichere Erkennungen je Slot, füllt stille passive Karten auf (`Confidence::Remembered`) |
 | `.../alerts.rs` | Benachrichtigungsregeln mit Hysterese + `AlertSettings` |
 | `.../mock.rs` | Aufgezeichnete Testdaten (`--mock`, Testfixture) |
 | `.../saver.rs` | Zustandsmaschine Auto-Sparmodus (niedriger Akku) |
-| `crates/fw-ams-tuner/src/engine.rs` | CPU-Tuner: Profil anwenden, rücklesen, Firmware-Override erkennen/wiederherstellen, Ereignislog |
+| `crates/fw-ams-tuner/src/engine.rs` | CPU-Tuner: Profil anwenden, rücklesen, Firmware-Override erkennen/wiederherstellen, Energieplan-Originale (`plan_originals.json`), Ereignislog |
 | `.../{family,pm_table}.rs` | SMU-Message-IDs, Mailbox, PM-Tabellen-Offsets je CPU (aus RyzenAdj) |
 | `.../smu/{pawnio,mock}.rs` | SMU-Backends: PawnIO + RyzenSMU-Modul (Windows), Simulation |
 | `.../{winpower,oscpu}.rs` | Windows-Energieplan/-modus, PDH-Takt/-Last |
 | `.../{protocol,client}.rs` | Named Pipe App ↔ Dienst (JSON-Zeilen), Dienststatus, UAC-Start |
 | `crates/fw-ams-service` | Windows-Dienst (LocalSystem), Pipe-Server, install/uninstall/console |
 | `crates/fw-ams-cli` | CLI zum Debuggen (`status`, `cards`, `usb`, `dump`, `--mock`) |
-| `app/src-tauri/src/main.rs` | Commands, Poller-Thread, Tuner-Thread, Fenster-Events |
-| `.../charge.rs`, `tuner.rs` | Ladelimit/-strom mit Statusmodell; Tuner-Anbindung, Verlauf (10 min) |
+| `app/src-tauri/src/main.rs` | Setup, Fenster-Events, Exit (Sparmodus beenden) |
+| `.../state.rs`, `commands.rs`, `poller.rs` | `AppState` (+ Lock-Reihenfolge, `commit_settings`, `Wake`); alle Commands; Poller- und Tuner-Thread |
+| `.../charge.rs`, `tuner.rs`, `saver.rs` | Ladelimit/-strom mit Statusmodell und gemerktem Original; Tuner-Anbindung, Verlauf (10 min); Sparmodus |
+| `.../reset.rs`, `store.rs` | Zusatzfunktionen aus / Werksreset mit Bericht je Schritt; JSON-Dateien im App-Config-Dir |
 | `.../tray.rs`, `flyout.rs` | Tray-Icon, Hover-Flyout (Breite `WIDTH` hier **und** in `Flyout.tsx`) |
 | `.../settings.rs` | `Settings` (+ `Theme`), JSON in App-Config-Dir, `sanitized()` klemmt Werte |
 | `app/src/api.ts` | `useSnapshot`, `useSettings`, Settings-Commands |
 | `app/src/slots.ts` | `describe`, `flow`, `slotRows`: gemeinsam für Flyout, Diagramm, Ports |
 | `app/src/theme.ts` | Dark Mode (`.dark` auf `<html>`, Titelleiste, localStorage-Cache) |
 | `app/src/format.ts` | Zahlenformat (`num`, `signed`), Labels, `cardStyle` |
-| `app/src/pages/*`, `components/*` | Seiten (Übersicht, Ports, Thermik, System, Erweitert, Einstellungen), `LaptopDiagram`, `BatteryRing`, `Stat`, `LineChart`, `TuneTable`, `PowerBreakdown`, `controls` |
+| `app/src/pages/*`, `pages/advanced/*` | Seiten (Übersicht, Ports, Thermik, System, Erweitert, Einstellungen); Erweitert ist in Live, Tuning, BatteryCare, Events, Setup zerlegt |
+| `app/src/components/*` | `ui` (Card, Button, ConfirmButton, Notice, Toast), `controls` (Row, Switch, NumberInput), `ResetPanel`, `LaptopDiagram`, `BatteryRing`, `Stat`, `LineChart`, `TuneTable`, `PowerBreakdown` |
 | `app/src/bindings/` | **generiert**, nie von Hand ändern |
 
 ## Datenfluss
-`Collector` → Poller-Thread (`main.rs`) → Tray + Alerts + Event `snapshot` → `useSnapshot()`.
+`Collector` → Poller-Thread (`poller.rs`: Kartengedächtnis, Ladesteuerung, Alerts, Sparmodus) → Tray + Event `snapshot` → `useSnapshot()`.
 Weitere Events: `settings` (nach `set_settings`, für Live-Theme), `navigate` (Slotnummer, vom Flyout),
 `charge` (Ladesteuerung), `tuner` (1 Hz: `TunerView` + `HistorySample`).
 Commands: `get_snapshot`, `get_settings`, `set_settings`, `show_main(slot?)`, `test_notification`,
-`get_charge_control`, `charge_full_once`, `get_tuner`, `get_history`, `tuner_set_config`, `tuner_reset`,
-`tuner_install`, `tuner_uninstall`, `set_power_mode`, `open_pawnio_site`.
+`forget_cards(slot?)`, `reset_system({factory, removeService})`, `get_charge_control`, `charge_full_once`,
+`get_tuner`, `get_setup`, `get_history`, `tuner_set_config`, `tuner_reset`, `tuner_install`, `tuner_uninstall`,
+`set_power_mode`, `open_pawnio_site`.
 Tuner: App → Named Pipe `\\.\pipe\fw-ams-tuner` → `fw-ams-service` → `Engine` → PawnIO. Mit `--mock` läuft die Engine simuliert in der App.
 
 ## Befehle
@@ -55,6 +60,7 @@ Tuner: App → Named Pipe `\\.\pipe\fw-ams-tuner` → `fw-ams-service` → `Engi
 
 ## Rezepte
 - **Neue Einstellung:** Feld in `settings.rs` (bzw. `AlertSettings`) + Default + ggf. `sanitized()` → `cargo test` → UI in `pages/Settings.tsx` (`Row` + `Switch`/`NumberInput`; speichert automatisch).
+- **Neue Funktion, die das System verändert:** nur bei `settings.advanced_features`, Originalwert vor dem ersten Schreiben merken und in `reset.rs` zurückschreiben (Schritt im Bericht).
 - **Neuer Kartentyp:** `CardKind` (model.rs) + `cards/catalog.rs` + `cardStyle` in `format.ts`.
 - **Slot kalibrieren:** `fw-ams usb` ausführen, Root-Port in `cards/slots.rs` eintragen.
 - **Neuer Tuning-Parameter:** `ParamId` + `TuneProfile` (types.rs) + `family::specs` + `Engine::read_actual`/`write` → UI-Text in `paramMeta` (format.ts).
@@ -71,4 +77,9 @@ Tuner: App → Named Pipe `\\.\pipe\fw-ams-tuner` → `fw-ams-service` → `Engi
 - Dienst nimmt nur typisierte, geklemmte Werte an (`Engine::sanitize`), nie rohe SMU-Befehle. Pipe-DACL: SYSTEM, Admins, installierender Nutzer.
 - Gerät des Entwicklers ist Krackan Point (Ryzen AI 7 350, PM-Tabelle 0x650005): Kern-Offsets unbekannt, daher Kernwerte aus PDH.
 - Curve Optimizer ist nicht rücklesbar (Status „gesendet, nicht rücklesbar“); nach Absturz im Testlauf nie automatisch anwenden.
+- Windows-Energieplanwerte (EPP, Boost, max. Takt) sind dauerhaft, SMU-Werte nicht. Die Engine merkt sich Plan-Originale je AC/DC; `fw-ams-service uninstall` stellt sie wieder her, `--purge` löscht zusätzlich Profile und Log.
+- Ladelimit: Original steht in `charge-restore.json`, wird beim Ausschalten der Verwaltung zurückgeschrieben.
+- Kartengedächtnis (`cards.json`) wird mit `--mock` nicht gespeichert. Leerer Slot zeigt nur USB-A/USB-C aus dem Gedächtnis, aktive Karten nie (die brauchen Strom, leer = wirklich leer).
+- Poller liest Settings unter der Collector-Sperre; `reset.rs` hält sie beim Ändern, sonst schreibt ein laufender Poll alte Werte zurück.
+- Bestätigungen über `ConfirmButton`, nicht `window.confirm`.
 - Commits: auf Feature-Branch, je Phase/kleinem Schritt (Wunsch des Nutzers).

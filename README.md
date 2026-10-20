@@ -73,6 +73,24 @@ und Tabellen-Offsets stammen aus RyzenAdj. Für Krackan Point (z. B. Ryzen AI 7 
 und Tctl bekannt, Werte pro Kern kommen aus den Windows-Leistungsindikatoren. Alle SMU-Werte
 sind flüchtig: ein Neustart setzt sie zurück. Linux: siehe `docs/linux-advanced.md`.
 
+## Expansion Cards merken
+
+Passive Karten melden sich nicht immer: Eine USB-C-Karte ist ohne angeschlossenes Gerät
+unsichtbar, eine USB-A-Karte nach dem Standby oft auch. fw-ams merkt sich deshalb, welche Karte
+zuletzt sicher in welchem Slot erkannt wurde, und zeigt sie weiter an (blass, gestrichelt, „↺“).
+Nach dem Umstecken: Ports & Karten → „Slot vergessen“ oder Einstellungen → „Alle vergessen“.
+Gespeichert in `cards.json` neben `settings.json`.
+
+## Zurücksetzen
+
+Einstellungen → „Erweiterte Funktionen“ ausschalten macht alles rückgängig, was fw-ams am System
+verändert hat, und lässt nur die Überwachung laufen: CPU-Profile leeren, Powerlimits, Curve
+Optimizer und Windows-Energieplan auf die Werte von vorher, ursprüngliches Ladelimit zurück in den
+EC, Ladestrom ohne Limit, Sparmodus beenden. Optional wird der Hilfsdienst samt Profilen
+deinstalliert. „Werkseinstellungen“ setzt zusätzlich alle Einstellungen zurück, entfernt den
+Autostart-Eintrag und löscht die gemerkten Karten. Jeder Schritt wird mit Ergebnis angezeigt.
+Den separat installierten PawnIO-Treiber entfernt fw-ams nicht.
+
 ## Kalibrierung der Slots
 
 Die Zuordnung USB-Root-Port → Slot steht in `crates/fw-ams-core/src/cards/slots.rs`.
