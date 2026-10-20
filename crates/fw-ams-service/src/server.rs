@@ -5,8 +5,8 @@ use fw_ams_tuner::client::wide;
 use fw_ams_tuner::protocol::{Request, Response, PIPE_NAME};
 use fw_ams_tuner::winpower::{self, WindowsPowerPlan};
 use fw_ams_tuner::Engine;
-use std::io::{BufRead, BufReader, Write};
-use std::os::windows::io::FromRawHandle;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -148,21 +148,30 @@ fn serve(engine: Arc<Mutex<Engine>>, stop: Arc<AtomicBool>) {
         // SAFETY: we own the handle; File closes it on drop
         let file = unsafe { std::fs::File::from_raw_handle(handle as _) };
         if connected && !stop.load(Ordering::SeqCst) {
-            if let Err(e) = handle_client(&file, &engine) {
-                log::warn!("pipe client: {e}");
-            }
-            unsafe {
-                FlushFileBuffers(handle);
-                DisconnectNamedPipe(handle);
-            }
+            // Own thread per client: one that connects and never sends (or a crashed app)
+            // must not block everyone else. The loop creates the next pipe instance right away.
+            let engine = engine.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = handle_client(&file, &engine) {
+                    log::warn!("pipe client: {e}");
+                }
+                let h = file.as_raw_handle();
+                // SAFETY: handle stays valid until `file` is dropped below
+                unsafe {
+                    FlushFileBuffers(h as _);
+                    DisconnectNamedPipe(h as _);
+                }
+            });
         }
-        drop(file);
     }
 }
 
+/// Requests are small JSON lines; anything longer is not from the app
+const MAX_REQUEST: u64 = 1024 * 1024;
+
 fn handle_client(file: &std::fs::File, engine: &Mutex<Engine>) -> std::io::Result<()> {
     let mut line = String::new();
-    BufReader::new(file).read_line(&mut line)?;
+    BufReader::new(file.take(MAX_REQUEST)).read_line(&mut line)?;
     let response = match serde_json::from_str::<Request>(&line) {
         Ok(req) => process(req, engine),
         Err(e) => Response::Error {

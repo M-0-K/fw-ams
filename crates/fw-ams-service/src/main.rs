@@ -8,8 +8,9 @@
 //!   fw-ams-service install [--user-sid S-1-5-…] [--module RyzenSMU.bin]
 //!                                                 copy to Program Files, register, start
 //!   fw-ams-service uninstall [--purge]            stop, unregister, remove files, restore the
-//!                                                 Windows power plan; --purge also deletes
-//!                                                 profiles and logs in %ProgramData%w-ams
+//!                                                 Windows power plan; --purge first resets the
+//!                                                 running service, then deletes profiles and
+//!                                                 logs in %ProgramData%\fw-ams
 //!   fw-ams-service console                        run in the foreground (debugging, needs admin)
 //!   fw-ams-service run                            entry point used by the service manager
 

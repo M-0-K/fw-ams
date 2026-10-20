@@ -1,9 +1,24 @@
 //! App side of the service connection (Windows): pipe requests, service status, elevated
 //! install via UAC.
+//!
+//! Every request has a deadline: the pipe is synchronous, so the exchange runs on a worker
+//! thread whose blocking I/O is cancelled when the service does not answer in time. After a
+//! timeout further requests fail fast for a short while, so a hung service cannot pile up
+//! worker threads (the app polls once per second).
 
 use crate::protocol::{Request, Response, PIPE_NAME, SERVICE_NAME};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::mpsc;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long the service may take for one request (SMU writes take milliseconds)
+pub const TIMEOUT: Duration = Duration::from_secs(5);
+/// After a timeout, requests fail right away for this long
+const BACKOFF: Duration = Duration::from_secs(15);
+
+static UNRESPONSIVE_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientError {
@@ -11,6 +26,8 @@ pub enum ClientError {
     NotRunning,
     /// Pipe exists but this user may not use it
     AccessDenied,
+    /// The service did not answer in time
+    Timeout,
     Io(String),
 }
 
@@ -19,15 +36,64 @@ impl std::fmt::Display for ClientError {
         match self {
             ClientError::NotRunning => write!(f, "Dienst nicht erreichbar"),
             ClientError::AccessDenied => write!(f, "Kein Zugriff auf den Dienst (anderer Benutzer?)"),
+            ClientError::Timeout => write!(f, "Dienst antwortet nicht (Zeitüberschreitung)"),
             ClientError::Io(e) => write!(f, "{e}"),
         }
     }
 }
 
+/// One request to the fw-ams service, with [`TIMEOUT`]
 pub fn request(req: &Request) -> Result<Response, ClientError> {
+    {
+        let mut since = UNRESPONSIVE_SINCE.lock().unwrap();
+        if since.is_some_and(|t| t.elapsed() < BACKOFF) {
+            return Err(ClientError::Timeout);
+        }
+        *since = None;
+    }
+    let r = request_at(PIPE_NAME, req, TIMEOUT);
+    if matches!(r, Err(ClientError::Timeout)) {
+        *UNRESPONSIVE_SINCE.lock().unwrap() = Some(Instant::now());
+    }
+    r
+}
+
+/// One request to the pipe `pipe`, giving up after `timeout`
+pub fn request_at(pipe: &str, req: &Request, timeout: Duration) -> Result<Response, ClientError> {
+    let (tx, rx) = mpsc::channel();
+    let (pipe, req) = (pipe.to_owned(), req.clone());
+    let worker = std::thread::spawn(move || {
+        let _ = tx.send(exchange(&pipe, &req));
+    });
+    if let Ok(r) = rx.recv_timeout(timeout) {
+        let _ = worker.join();
+        return r;
+    }
+    // Abort the blocking read/write. Retried a few times: the worker may be between two
+    // calls when the first cancel arrives.
+    for _ in 0..20 {
+        cancel_io(&worker);
+        if rx.recv_timeout(Duration::from_millis(50)).is_ok() {
+            let _ = worker.join();
+            break;
+        }
+    }
+    log::warn!("service did not answer within {timeout:?}");
+    Err(ClientError::Timeout)
+}
+
+fn cancel_io(worker: &std::thread::JoinHandle<()>) {
+    use std::os::windows::io::AsRawHandle;
+    // SAFETY: the handle belongs to a thread that is still joinable
+    unsafe {
+        windows_sys::Win32::System::IO::CancelSynchronousIo(worker.as_raw_handle() as _);
+    }
+}
+
+fn exchange(pipe: &str, req: &Request) -> Result<Response, ClientError> {
     let mut tries = 0;
     let file = loop {
-        match std::fs::OpenOptions::new().read(true).write(true).open(PIPE_NAME) {
+        match std::fs::OpenOptions::new().read(true).write(true).open(pipe) {
             Ok(f) => break f,
             Err(e) => match e.raw_os_error() {
                 Some(2) => return Err(ClientError::NotRunning),
@@ -164,5 +230,72 @@ pub fn run_elevated(exe: &Path, args: &str) -> Result<u32, String> {
         GetExitCodeProcess(info.hProcess, &mut code);
         CloseHandle(info.hProcess);
         Ok(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_WAIT};
+
+    /// Test pipe server for one client; `answer` = None never replies
+    fn serve_once(name: &str, answer: Option<Response>) -> std::thread::JoinHandle<()> {
+        let wide_name = wide(name);
+        // SAFETY: default security, handle owned by the File below
+        let handle = unsafe {
+            CreateNamedPipeW(wide_name.as_ptr(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, std::ptr::null())
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        let handle = handle as usize;
+        std::thread::spawn(move || {
+            let handle = handle as windows_sys::Win32::Foundation::HANDLE;
+            // SAFETY: valid pipe handle
+            unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+            let file = unsafe { std::fs::File::from_raw_handle(handle as _) };
+            let mut line = String::new();
+            let _ = BufReader::new(&file).read_line(&mut line);
+            match answer {
+                Some(r) => {
+                    let mut out = serde_json::to_string(&r).unwrap();
+                    out.push('\n');
+                    let _ = (&file).write_all(out.as_bytes());
+                }
+                // Hold the connection without answering until the client gives up
+                None => std::thread::sleep(Duration::from_secs(3)),
+            }
+        })
+    }
+
+    fn pipe_name(tag: &str) -> String {
+        format!(r"\\.\pipe\fw-ams-test-{tag}-{}", std::process::id())
+    }
+
+    #[test]
+    fn hung_service_times_out() {
+        let name = pipe_name("hung");
+        let server = serve_once(&name, None);
+        let start = Instant::now();
+        let r = request_at(&name, &Request::GetState, Duration::from_millis(300));
+        assert_eq!(r, Err(ClientError::Timeout));
+        assert!(start.elapsed() < Duration::from_secs(2), "took {:?}", start.elapsed());
+        let _ = server.join();
+    }
+
+    #[test]
+    fn answer_arrives() {
+        let name = pipe_name("ok");
+        let answer = Response::Error { message: "test".into() };
+        let server = serve_once(&name, Some(answer.clone()));
+        assert_eq!(request_at(&name, &Request::GetState, Duration::from_secs(5)), Ok(answer));
+        let _ = server.join();
+    }
+
+    #[test]
+    fn missing_service_is_not_running() {
+        let r = request_at(&pipe_name("missing"), &Request::GetState, Duration::from_secs(1));
+        assert_eq!(r, Err(ClientError::NotRunning));
     }
 }

@@ -3,7 +3,7 @@
 use crate::logger::{data_dir, LOG_FILE};
 use crate::server::{self, ServiceConfig, SERVICE_CONFIG};
 use fw_ams_tuner::engine::{restore_plan_originals, STORE_FILES};
-use fw_ams_tuner::protocol::{SERVICE_DISPLAY_NAME, SERVICE_NAME};
+use fw_ams_tuner::protocol::{Request, SERVICE_DISPLAY_NAME, SERVICE_NAME};
 use fw_ams_tuner::winpower::WindowsPowerPlan;
 use fw_ams_tuner::smu::pawnio::{find_module, MODULE_FILE};
 use std::ffi::OsString;
@@ -122,6 +122,13 @@ pub fn install(user_sid: Option<String>, module: Option<PathBuf>) -> Result<(), 
 pub fn uninstall(purge: bool) -> Result<(), String> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(err("Dienstverwaltung (Admin-Rechte?)"))?;
+    if purge {
+        // Let the running engine put SMU values back now instead of at the next reboot
+        match fw_ams_tuner::client::request(&Request::Reset) {
+            Ok(_) => log::info!("uninstall: tuner reset"),
+            Err(e) => log::info!("uninstall: tuner not reset ({e})"),
+        }
+    }
     stop_and_delete(&manager)?;
     let dir = install_dir();
     let _ = std::fs::remove_file(dir.join(EXE_NAME));
