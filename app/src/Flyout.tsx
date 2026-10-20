@@ -6,7 +6,7 @@ import type { PdPort } from "./bindings/PdPort";
 import type { Slot } from "./bindings/Slot";
 import type { Snapshot } from "./bindings/Snapshot";
 import { cardStyle, chargeStateLabel, num, signed } from "./format";
-import { describe, flow, slotRows } from "./slots";
+import { describe, flow, isSilent, slotRows } from "./slots";
 import { useTheme } from "./theme";
 
 const WIDTH = 400;
@@ -16,11 +16,12 @@ function Tile({ slot, port }: { slot?: Slot; port?: PdPort }) {
   const style = cardStyle[slot.card.kind];
   const f = flow(port);
   const warn = slot.hints.find((h) => h.severity === "warning");
-  const idle = slot.card.kind === "emptyOrPassive";
+  const silent = isSilent(slot);
+  const idle = slot.card.kind === "emptyOrPassive" || silent;
   return (
     <button
       onClick={() => invoke("show_main", { slot: slot.number })}
-      title={warn?.message ?? `${slot.location.label}: ${slot.card.name}`}
+      title={warn?.message ?? `${slot.location.label}: ${slot.card.name}${silent ? " (gemerkt)" : ""}`}
       className={`flex min-w-0 flex-col gap-1 rounded-xl border p-2 text-left transition hover:brightness-95 dark:hover:brightness-110 ${
         warn
           ? "border-red-400 bg-red-50 dark:border-red-700 dark:bg-red-950"
@@ -28,7 +29,14 @@ function Tile({ slot, port }: { slot?: Slot; port?: PdPort }) {
       }`}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${style.color}`}>{style.short}</span>
+        <span
+          className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${style.color} ${
+            silent ? "opacity-60 outline-1 -outline-offset-2 outline-dashed outline-white/80" : ""
+          }`}
+        >
+          {style.short}
+          {silent && " ↺"}
+        </span>
         {f && (
           <span
             className={`text-xs font-semibold tabular-nums ${

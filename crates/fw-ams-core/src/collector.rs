@@ -41,6 +41,11 @@ impl Collector {
         self.ec.is_some()
     }
 
+    /// Direct EC access for write commands (charge limit, charge current)
+    pub fn ec(&self) -> Option<&EcSource> {
+        self.ec.as_ref()
+    }
+
     /// Try to (re)open the EC, e.g. after the user installed the driver or udev rule.
     pub fn retry_ec(&mut self) -> bool {
         if self.ec.is_none() {
@@ -74,7 +79,7 @@ impl Collector {
         let battery = power
             .as_ref()
             .and_then(|p| build_battery(p, limit))
-            .map(|b| with_os_temperature(b));
+            .map(with_os_temperature);
         let charger = build_charger(power.as_ref().is_some_and(|p| p.ac_present), &ports);
         let thermal = ec.thermal().map(build_thermal);
         let slots = detect::detect(model, &self.layout, &ports, &usb);
@@ -159,7 +164,9 @@ fn with_os_temperature(mut b: Battery) -> Battery {
     b
 }
 
-pub fn build_battery(power: &RawPower, charge_limit: Option<u8>) -> Option<Battery> {
+/// `charge_limit` is (min %, max %) as reported by the EC
+pub fn build_battery(power: &RawPower, charge_limit: Option<(u8, u8)>) -> Option<Battery> {
+    let (limit_min, charge_limit) = (charge_limit.map(|l| l.0), charge_limit.map(|l| l.1));
     let b = power.battery.as_ref()?;
     let state = if b.charging {
         ChargeState::Charging
@@ -209,6 +216,7 @@ pub fn build_battery(power: &RawPower, charge_limit: Option<u8>) -> Option<Batte
             .then(|| 100.0 * b.full_mah as f32 / b.design_mah as f32),
         cycle_count: Some(b.cycle_count),
         charge_limit_percent: charge_limit,
+        charge_limit_min_percent: limit_min,
         minutes_remaining,
         temperature_c: None,
         manufacturer: Some(b.manufacturer.clone()).filter(|s| !s.is_empty()),

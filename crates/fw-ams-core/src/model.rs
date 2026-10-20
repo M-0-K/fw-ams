@@ -110,7 +110,10 @@ pub struct Battery {
     /// Last full charge capacity / design capacity
     pub health_percent: Option<f32>,
     pub cycle_count: Option<u32>,
+    /// Upper charge limit (EC stops charging here)
     pub charge_limit_percent: Option<u8>,
+    /// Lower end of the sustainer range; current Framework firmware ignores it
+    pub charge_limit_min_percent: Option<u8>,
     /// Time until empty (discharging) or until the charge limit (charging)
     pub minutes_remaining: Option<u32>,
     pub temperature_c: Option<f32>,
@@ -352,6 +355,8 @@ pub enum Confidence {
     Certain,
     /// Inferred from PD state or an uncalibrated port
     Likely,
+    /// Not reporting right now; shown from the card memory (passive cards without a device)
+    Remembered,
     Unknown,
 }
 
@@ -365,6 +370,9 @@ pub struct Card {
     /// What this card type does / which protocols it uses
     pub features: Vec<String>,
     pub usb_id: Option<String>,
+    /// Set when the card comes from the card memory: Unix ms it was last detected for sure
+    #[ts(type = "number | null")]
+    pub remembered_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

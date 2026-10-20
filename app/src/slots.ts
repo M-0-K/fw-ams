@@ -3,11 +3,24 @@ import type { Slot } from "./bindings/Slot";
 
 export type Flow = { dir: "in" | "out"; watts: number; upTo: boolean };
 
+/** Remembered card that is not reporting right now */
+export const isSilent = (slot: Slot) => slot.card.confidence === "remembered";
+
+/** "zuletzt erkannt 14:32" or with date when older than today */
+export function lastSeen(ms: number): string {
+  const d = new Date(ms);
+  const today = new Date().toDateString() === d.toDateString();
+  return today
+    ? `heute ${d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}`
+    : d.toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
 /** What is attached to the slot, in plain words */
 export function describe(slot: Slot, port?: PdPort): string {
   const devices = slot.devices
     .filter((d) => d.id !== slot.card.usbId)
     .map((d) => d.product ?? d.id);
+  if (isSilent(slot)) return "meldet sich gerade nicht";
   switch (slot.card.kind) {
     case "hdmi":
     case "displayPort":

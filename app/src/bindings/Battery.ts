@@ -14,7 +14,15 @@ powerW: number | null, remainingMah: number | null, fullMah: number | null, desi
 /**
  * Last full charge capacity / design capacity
  */
-healthPercent: number | null, cycleCount: number | null, chargeLimitPercent: number | null, 
+healthPercent: number | null, cycleCount: number | null, 
+/**
+ * Upper charge limit (EC stops charging here)
+ */
+chargeLimitPercent: number | null, 
+/**
+ * Lower end of the sustainer range; current Framework firmware ignores it
+ */
+chargeLimitMinPercent: number | null, 
 /**
  * Time until empty (discharging) or until the charge limit (charging)
  */

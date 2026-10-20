@@ -3,6 +3,7 @@ name = "fw-ams-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "fw-ams-app"
@@ -13,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 fw-ams-core.workspace = true
+fw-ams-tuner.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true

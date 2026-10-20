@@ -1,15 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["crates/fw-ams-core", "crates/fw-ams-cli", "app/src-tauri"]
+members = ["crates/fw-ams-core", "crates/fw-ams-tuner", "crates/fw-ams-service", "crates/fw-ams-cli", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "BSD-3-Clause"
+license = "GPL-3.0-or-later"
+authors = ["Moritz Kockert"]
 repository = "https://github.com/M-0-K/fw-ams"
 
 [workspace.dependencies]
 fw-ams-core = { path = "crates/fw-ams-core" }
+fw-ams-tuner = { path = "crates/fw-ams-tuner" }
 framework_lib = "0.6.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -7,8 +7,8 @@
 use super::catalog::{self, card_type, kind_by_usb_id};
 use super::slots::{usb_a_standby_penalty, SlotDef};
 use crate::model::{
-    Card, CardKind, Confidence, DataRole, Hint, Model, Partner, PdPort, PowerRole, Severity, Slot,
-    UsbDevice,
+    Card, CardKind, Confidence, DataRole, Hint, Location, Model, Partner, PdPort, PowerRole,
+    Severity, Slot, SlotCapabilities, UsbDevice,
 };
 
 /// Below this a USB-C charger is considered too weak for a laptop
@@ -69,7 +69,7 @@ fn looks_like_active_card(p: &PdPort) -> bool {
     p.partner == Partner::Sink && p.pd_contract && p.vconn
 }
 
-fn card(kind: CardKind, confidence: Confidence, usb_id: Option<String>) -> Card {
+pub fn card(kind: CardKind, confidence: Confidence, usb_id: Option<String>) -> Card {
     let t = card_type(kind);
     Card {
         kind,
@@ -77,7 +77,13 @@ fn card(kind: CardKind, confidence: Confidence, usb_id: Option<String>) -> Card 
         name: t.name.to_owned(),
         features: t.features.iter().map(|s| s.to_string()).collect(),
         usb_id,
+        remembered_ms: None,
     }
+}
+
+/// PD port of a slot in the snapshot's port list
+pub fn slot_port<'a>(slot: &Slot, ports: &'a [PdPort]) -> Option<&'a PdPort> {
+    slot.pd_port.and_then(|i| ports.iter().find(|p| p.index == i))
 }
 
 fn classify(pd: Option<&PdPort>, devs: &[UsbDevice], calibrated: bool) -> Card {
@@ -158,12 +164,24 @@ fn protocols(pd: Option<&PdPort>, devs: &[UsbDevice]) -> Vec<String> {
     out
 }
 
-fn hints(model: Model, def: &SlotDef, pd: Option<&PdPort>, card: &Card, calibrated: bool) -> Vec<Hint> {
+/// Hints for the card in a slot. Public so the card memory can redo them after replacing the card.
+pub fn slot_hints(model: Model, slot: &Slot, pd: Option<&PdPort>, calibrated: bool) -> Vec<Hint> {
+    hints(model, &slot.location, &slot.capabilities, pd, &slot.card, calibrated)
+}
+
+fn hints(
+    model: Model,
+    location: &Location,
+    capabilities: &SlotCapabilities,
+    pd: Option<&PdPort>,
+    card: &Card,
+    calibrated: bool,
+) -> Vec<Hint> {
     let mut out = vec![];
     let mut push = |severity, message: String| out.push(Hint { severity, message });
 
     if catalog::needs_display(card.kind) {
-        if def.capabilities.display == Some(false) {
+        if capabilities.display == Some(false) {
             push(
                 Severity::Warning,
                 format!("{} unterstützt in diesem Slot keine Displayausgabe.", card.name),
@@ -172,7 +190,7 @@ fn hints(model: Model, def: &SlotDef, pd: Option<&PdPort>, card: &Card, calibrat
             push(Severity::Info, "Kein Monitor aktiv (DP Alt Mode nicht ausgehandelt).".into());
         }
     }
-    if card.kind == CardKind::UsbA && usb_a_standby_penalty(model, def) {
+    if card.kind == CardKind::UsbA && usb_a_standby_penalty(model, location) {
         push(
             Severity::Info,
             "USB-A-Karte in einem hinteren Slot erhöht den Standby-Verbrauch – \
@@ -213,7 +231,7 @@ fn build_slot(
         pd_port: def.pd_port,
         capabilities: def.capabilities.clone(),
         protocols: protocols(pd, &devices),
-        hints: hints(model, def, pd, &card, calibrated),
+        hints: hints(model, &def.location, &def.capabilities, pd, &card, calibrated),
         card,
         devices,
     }

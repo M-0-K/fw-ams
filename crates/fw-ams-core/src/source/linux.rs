@@ -73,6 +73,8 @@ pub fn battery() -> Option<Battery> {
         cycle_count: read_num(&bat.join("cycle_count")).map(|v| v as u32),
         charge_limit_percent: read_num(&bat.join("charge_control_end_threshold"))
             .map(|v| v as u8),
+        charge_limit_min_percent: read_num(&bat.join("charge_control_start_threshold"))
+            .map(|v| v as u8),
         minutes_remaining: None,
         temperature_c: read_num(&bat.join("temp")).map(|v| v as f32 / 10.0),
         manufacturer: read(&bat.join("manufacturer")),

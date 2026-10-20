@@ -1,79 +1,29 @@
 // Prevents an additional console window on Windows in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod charge;
+mod commands;
 mod flyout;
+mod poller;
+mod reset;
+mod saver;
 mod settings;
+mod state;
+mod store;
 mod tray;
+mod tuner;
 
-use fw_ams_core::alerts::AlertState;
-use fw_ams_core::{mock, Collector, Snapshot};
-use settings::Settings;
+use charge::ChargeController;
+use fw_ams_core::cards::memory::CardMemory;
+use fw_ams_core::Collector;
+use saver::PowerSaver;
+use state::{AppState, SharedState, Wake};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
-use tauri_plugin_notification::NotificationExt;
-
-/// How often to retry opening the EC while it is unavailable
-const EC_RETRY: Duration = Duration::from_secs(30);
-
-struct AppState {
-    latest: RwLock<Option<Snapshot>>,
-    settings: RwLock<Settings>,
-    settings_path: PathBuf,
-}
-
-type SharedState = Arc<AppState>;
-
-#[tauri::command]
-fn get_snapshot(state: State<SharedState>) -> Option<Snapshot> {
-    state.latest.read().unwrap().clone()
-}
-
-/// Open the main window, optionally jumping to the details of one slot
-#[tauri::command]
-fn show_main(app: AppHandle, slot: Option<u8>) {
-    flyout::hide(&app);
-    show_main_window(&app);
-    if let Some(slot) = slot {
-        let _ = app.emit("navigate", slot);
-    }
-}
-
-#[tauri::command]
-fn test_notification(app: AppHandle) -> Result<(), String> {
-    app.notification()
-        .builder()
-        .title("fw-ams")
-        .body("Benachrichtigungen funktionieren.")
-        .show()
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn get_settings(state: State<SharedState>) -> Settings {
-    state.settings.read().unwrap().clone()
-}
-
-#[tauri::command]
-fn set_settings(app: AppHandle, state: State<SharedState>, settings: Settings) -> Result<Settings, String> {
-    let settings = settings.sanitized();
-    settings::save(&state.settings_path, &settings).map_err(|e| e.to_string())?;
-    apply_autostart(&app, settings.autostart);
-    *state.settings.write().unwrap() = settings.clone();
-    // Lets the flyout and main window pick up the new theme right away
-    let _ = app.emit("settings", &settings);
-    Ok(settings)
-}
-
-fn apply_autostart(app: &AppHandle, enabled: bool) {
-    let launcher = app.autolaunch();
-    let result = if enabled { launcher.enable() } else { launcher.disable() };
-    if let Err(e) = result {
-        log::warn!("autostart: {e}");
-    }
-}
+use std::sync::{Arc, Mutex, RwLock};
+use store::Paths;
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri_plugin_autostart::MacosLauncher;
+use tuner::Tuner;
 
 pub fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -83,54 +33,36 @@ pub fn show_main_window(app: &AppHandle) {
     }
 }
 
-fn spawn_poller(app: AppHandle, state: SharedState, use_mock: bool) {
-    std::thread::spawn(move || {
-        let mut collector = (!use_mock).then(Collector::new);
-        let mut alerts = AlertState::default();
-        let mut last_retry = Instant::now();
-        loop {
-            if let Some(c) = collector.as_mut() {
-                if !c.ec_available() && last_retry.elapsed() >= EC_RETRY {
-                    last_retry = Instant::now();
-                    c.retry_ec();
-                }
-            }
-            let snapshot = match &collector {
-                Some(c) => c.snapshot(),
-                None => mock::snapshot(),
-            };
+/// fw-ams-service.exe is bundled next to the app (and built into the same target dir)
+fn service_exe() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("fw-ams-service.exe")))
+}
 
-            let settings = state.settings.read().unwrap().clone();
-            for alert in alerts.evaluate(&snapshot, &settings.alerts) {
-                if let Err(e) = app
-                    .notification()
-                    .builder()
-                    .title(&alert.title)
-                    .body(&alert.body)
-                    .show()
-                {
-                    log::warn!("notification failed: {e}");
-                }
-            }
-            tray::update(&app, &snapshot);
-            if let Err(e) = app.emit("snapshot", &snapshot) {
-                log::warn!("emit failed: {e}");
-            }
-            *state.latest.write().unwrap() = Some(snapshot);
-
-            std::thread::sleep(Duration::from_millis(settings.poll_interval_ms as u64));
-        }
-    });
+/// RyzenSMU.bin: bundled resource, or the copy fetched for development
+fn pawnio_module(app: &AppHandle) -> Option<PathBuf> {
+    let bundled = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|d| d.join("resources").join("RyzenSMU.bin"));
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("RyzenSMU.bin");
+    bundled.filter(|p| p.is_file()).or(Some(dev))
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Uninstaller: undo the EC changes without starting the UI
+    if args.iter().any(|a| a == "--restore-system") {
+        std::process::exit(reset::headless());
+    }
     let use_mock = args.iter().any(|a| a == "--mock") || std::env::var_os("FW_AMS_MOCK").is_some();
     let started_minimized = args.iter().any(|a| a == "--minimized");
     // Debug aid: open the tray flyout right away
     let open_flyout = args.iter().any(|a| a == "--flyout");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
@@ -145,18 +77,25 @@ fn main() {
             Some(vec!["--minimized"]),
         ))
         .setup(move |app| {
-            let settings_path = app.path().app_config_dir()?.join("settings.json");
-            let settings = settings::load(&settings_path);
-            log::info!("fw-ams starting (mock: {use_mock}), settings {settings_path:?}");
+            let paths = Paths::new(&app.path().app_config_dir()?, use_mock);
+            let settings = settings::load(&paths.settings);
+            log::info!("fw-ams starting (mock: {use_mock}), settings {:?}", paths.settings);
 
             let handle = app.handle().clone();
-            apply_autostart(&handle, settings.autostart);
+            state::apply_autostart(&handle, settings.autostart);
             let stay_in_tray = started_minimized && settings.start_minimized;
+            let cards: CardMemory = paths.cards.as_deref().map(store::load).unwrap_or_default();
 
             let state: SharedState = Arc::new(AppState {
                 latest: RwLock::new(None),
                 settings: RwLock::new(settings),
-                settings_path,
+                collector: Mutex::new((!use_mock).then(Collector::new)),
+                charge: Mutex::new(ChargeController::new(use_mock, paths.charge.clone())),
+                cards: Mutex::new(cards),
+                saver: Mutex::new(PowerSaver::default()),
+                tuner: Tuner::new(use_mock, service_exe(), pawnio_module(&handle)),
+                wake: Wake::default(),
+                paths,
             });
             app.manage(state.clone());
 
@@ -168,7 +107,8 @@ fn main() {
             if open_flyout {
                 flyout::show_in_corner(&handle);
             }
-            spawn_poller(handle, state, use_mock);
+            poller::spawn_poller(handle.clone(), state.clone());
+            poller::spawn_tuner(handle, state);
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -183,11 +123,36 @@ fn main() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, get_settings,
-            set_settings,
-            show_main,
-            test_notification
+        .invoke_handler(tauri::generate_handler![
+            commands::get_snapshot,
+            commands::get_settings,
+            commands::set_settings,
+            commands::show_main,
+            commands::test_notification,
+            commands::forget_cards,
+            commands::reset_system,
+            commands::get_charge_control,
+            commands::charge_full_once,
+            commands::get_tuner,
+            commands::get_setup,
+            commands::get_history,
+            commands::tuner_set_config,
+            commands::tuner_reset,
+            commands::tuner_install,
+            commands::tuner_uninstall,
+            commands::set_power_mode,
+            commands::open_pawnio_site
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running fw-ams");
+        .build(tauri::generate_context!())
+        .expect("error while building fw-ams");
+
+    app.run(|app, event| {
+        // A saver that is active when the app quits would otherwise leave Windows in
+        // "best power efficiency"
+        if let RunEvent::Exit = event {
+            if let Some(state) = app.try_state::<SharedState>() {
+                state.saver.lock().unwrap().stop(&state.tuner);
+            }
+        }
+    });
 }

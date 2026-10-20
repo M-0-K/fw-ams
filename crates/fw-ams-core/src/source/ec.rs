@@ -5,8 +5,9 @@
 //! mapping logic can be unit tested without hardware.
 
 use crate::model::{Model, Partner, PowerRole};
-use framework_lib::chromium_ec::commands::EcRequestGetPdPortState;
-use framework_lib::chromium_ec::{CrosEc, EcRequestRaw};
+use framework_lib::chromium_ec::command::EcCommands;
+use framework_lib::chromium_ec::commands::{ChargeLimitControlModes, EcRequestGetPdPortState};
+use framework_lib::chromium_ec::{CrosEc, CrosEcDriver, EcRequestRaw};
 use framework_lib::power::{self, FanSpeed, TempSensor, UsbPowerRoles};
 use framework_lib::smbios;
 use framework_lib::smbios::Platform;
@@ -23,6 +24,24 @@ fn guarded<T>(what: &str, f: impl FnOnce() -> Option<T>) -> Option<T> {
         }
     }
 }
+
+/// Like [`guarded`] for write commands, keeping the error text for the UI
+fn guarded_write<E: std::fmt::Debug>(what: &str, f: impl FnOnce() -> Result<(), E>) -> Result<(), String> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            log::warn!("{what} failed: {e:?}");
+            Err(format!("{e:?}"))
+        }
+        Err(_) => {
+            log::warn!("framework_lib panicked in {what}");
+            Err("framework_lib panic".into())
+        }
+    }
+}
+
+/// Lowest maximum charge limit the EC accepts (same check as framework_tool)
+pub const CHARGE_LIMIT_MIN_MAX: u8 = 25;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawBattery {
@@ -137,9 +156,38 @@ impl EcSource {
         })
     }
 
-    /// Charge limit (max %) – `None` if the EC does not support it
-    pub fn charge_limit(&self) -> Option<u8> {
-        guarded("get_charge_limit", || self.ec.get_charge_limit().ok()).map(|(_min, max)| max)
+    /// Charge limit as (min %, max %) – `None` if the EC does not support it
+    pub fn charge_limit(&self) -> Option<(u8, u8)> {
+        guarded("get_charge_limit", || self.ec.get_charge_limit().ok())
+    }
+
+    /// Set the sustainer range. Current Framework firmware only enforces `max`.
+    pub fn set_charge_limit(&self, min: u8, max: u8) -> Result<(), String> {
+        let max = max.clamp(CHARGE_LIMIT_MIN_MAX, 100);
+        let min = min.min(max);
+        guarded_write("set_charge_limit", || self.ec.set_charge_limit(min, max))
+    }
+
+    /// Charge to 100 % once, the limit applies again on the next cycle
+    pub fn charge_limit_override(&self) -> Result<(), String> {
+        let (min, max) = self.charge_limit().unwrap_or((0, 100));
+        guarded_write("charge_limit_override", || {
+            self.ec
+                .send_command(
+                    EcCommands::ChargeLimitControl as u16,
+                    0,
+                    &[ChargeLimitControlModes::Override as u8, max, min],
+                )
+                .map(|_| ())
+        })
+    }
+
+    /// Limit the battery charge current; `None` removes the limit.
+    /// The EC forgets this on reboot or shutdown, so callers re-apply it.
+    pub fn set_charge_current_limit(&self, ma: Option<u32>) -> Result<(), String> {
+        // ChromeOS EC treats u32::MAX as "no limit"
+        let current = ma.unwrap_or(u32::MAX);
+        guarded_write("set_charge_current_limit", || self.ec.set_charge_current_limit(current, None))
     }
 
     pub fn pd_states(&self) -> Vec<Option<RawPdState>> {

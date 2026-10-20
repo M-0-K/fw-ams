@@ -3,6 +3,7 @@ name = "fw-ams-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "fw-ams"
@@ -10,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 fw-ams-core.workspace = true
+fw-ams-tuner.workspace = true
 framework_lib.workspace = true
 nusb.workspace = true
 serde_json.workspace = true

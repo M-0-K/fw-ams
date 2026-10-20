@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Sicherheitslücke melden
+    url: https://github.com/M-0-K/fw-ams/security/advisories/new
+    about: Bitte vertraulich melden, nicht als öffentliches Issue.
