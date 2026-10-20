@@ -14,9 +14,20 @@ $Work = Join-Path ([System.IO.Path]::GetTempPath()) "fw-ams-pawnio-$Version"
 New-Item -ItemType Directory -Force $Target, $Work | Out-Null
 $Zip = Join-Path $Work "release.zip"
 Write-Host "Lade PawnIO.Modules $Version ..."
-Invoke-WebRequest -Uri $Url -OutFile $Zip -UseBasicParsing
+# Plain .NET instead of Invoke-WebRequest/Get-FileHash: Windows PowerShell started from
+# PowerShell 7 (e.g. on GitHub runners) may fail to load those cmdlets' module
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$Client = New-Object System.Net.WebClient
+try { $Client.DownloadFile($Url, $Zip) } finally { $Client.Dispose() }
 
-$Hash = (Get-FileHash $Zip -Algorithm SHA256).Hash.ToLower()
+$Sha = [System.Security.Cryptography.SHA256]::Create()
+$Stream = [System.IO.File]::OpenRead($Zip)
+try {
+    $Hash = -join ($Sha.ComputeHash($Stream) | ForEach-Object { $_.ToString("x2") })
+} finally {
+    $Stream.Dispose()
+    $Sha.Dispose()
+}
 if ($Hash -ne $Sha256) {
     throw "SHA-256 stimmt nicht: $Hash (erwartet $Sha256)"
 }
