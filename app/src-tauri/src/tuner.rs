@@ -68,7 +68,7 @@ pub struct HistorySample {
 }
 
 enum Backend {
-    Mock { engine: Mutex<Engine>, start: Instant },
+    Mock { engine: Box<Mutex<Engine>>, start: Instant },
     Service,
 }
 
@@ -85,7 +85,7 @@ impl Tuner {
     pub fn new(mock: bool, service_exe: Option<PathBuf>, module: Option<PathBuf>) -> Self {
         let backend = if mock {
             Backend::Mock {
-                engine: Mutex::new(fw_ams_tuner::mock_engine()),
+                engine: Box::new(Mutex::new(fw_ams_tuner::mock_engine())),
                 start: Instant::now(),
             }
         } else {

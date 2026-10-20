@@ -79,7 +79,7 @@ impl Collector {
         let battery = power
             .as_ref()
             .and_then(|p| build_battery(p, limit))
-            .map(|b| with_os_temperature(b));
+            .map(with_os_temperature);
         let charger = build_charger(power.as_ref().is_some_and(|p| p.ac_present), &ports);
         let thermal = ec.thermal().map(build_thermal);
         let slots = detect::detect(model, &self.layout, &ports, &usb);

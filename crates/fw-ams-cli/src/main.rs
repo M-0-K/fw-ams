@@ -145,6 +145,8 @@ fn print_cards(s: &Snapshot) {
         let conf = match slot.card.confidence {
             Confidence::Certain => "",
             Confidence::Likely => " (vermutlich)",
+            // The CLI has no card memory; listed for completeness
+            Confidence::Remembered => " (gemerkt)",
             Confidence::Unknown => " (unklar)",
         };
         println!(
