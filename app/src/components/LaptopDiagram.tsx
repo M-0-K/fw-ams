@@ -1,6 +1,6 @@
 import type { Slot } from "../bindings/Slot";
 import { cardStyle } from "../format";
-import { slotRows } from "../slots";
+import { isSilent, slotRows } from "../slots";
 
 const KEY_ROWS = [14, 14, 13, 12, 8];
 
@@ -21,17 +21,18 @@ export default function LaptopDiagram({
     const style = cardStyle[slot.card.kind];
     const active = selected === slot.number;
     const warn = slot.hints.some((h) => h.severity === "warning");
+    const silent = isSilent(slot);
     const unsure = slot.card.confidence !== "certain" && slot.card.kind !== "emptyOrPassive";
     return (
       <button
         key={slot.number}
         onClick={() => onSelect?.(slot.number)}
-        title={`${slot.location.label}: ${slot.card.name}`}
+        title={`${slot.location.label}: ${slot.card.name}${silent ? " (gemerkt, meldet sich gerade nicht)" : ""}`}
         className={`relative flex ${compact ? "h-11 w-16 text-xs" : "h-16 w-24 text-sm"} items-center justify-center font-bold shadow-md transition hover:brightness-110 focus-visible:outline-2 focus-visible:outline-accent ${
           side === "left" ? "rounded-l-xl rounded-r-md" : "rounded-r-xl rounded-l-md"
         } ${style.color} ${
           active ? "ring-4 ring-accent ring-offset-2 ring-offset-slate-100 dark:ring-offset-slate-900" : ""
-        } ${unsure ? "opacity-80" : ""}`}
+        } ${silent ? "opacity-60 outline-2 -outline-offset-4 outline-dashed outline-white/80" : unsure ? "opacity-80" : ""}`}
       >
         {/* port opening on the outer edge */}
         <span
@@ -42,6 +43,11 @@ export default function LaptopDiagram({
         {style.short}
         {slot.card.confidence === "likely" && slot.card.kind !== "emptyOrPassive" && (
           <span className="absolute right-1.5 top-0.5 text-[10px] font-normal">?</span>
+        )}
+        {silent && (
+          <span className="absolute right-1.5 top-0.5 text-[10px] font-normal" aria-label="gemerkt">
+            ↺
+          </span>
         )}
         {warn && (
           <span className="absolute -top-1.5 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full bg-red-500 ring-2 ring-white dark:ring-slate-900" />

@@ -4,7 +4,7 @@ use crate::charge::ChargeControl;
 use crate::reset::{self, ResetReport, ResetRequest};
 use crate::settings::Settings;
 use crate::state::SharedState;
-use crate::tuner::{HistorySample, TunerView};
+use crate::tuner::{HistorySample, SetupInfo, TunerView};
 use crate::{flyout, show_main_window};
 use fw_ams_core::Snapshot;
 use fw_ams_tuner::winpower::{self, PowerMode};
@@ -78,6 +78,12 @@ pub fn charge_full_once(state: State<SharedState>) -> Result<ChargeControl, Stri
 #[tauri::command]
 pub fn get_tuner(state: State<SharedState>) -> Option<TunerView> {
     state.tuner.latest()
+}
+
+/// Service / driver installation state, also while the extra features are off
+#[tauri::command]
+pub fn get_setup(state: State<SharedState>) -> SetupInfo {
+    state.tuner.setup()
 }
 
 #[tauri::command]

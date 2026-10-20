@@ -24,7 +24,14 @@ export default function App() {
   const [page, setPage] = useState<PageId>("overview");
   const snapshot = useSnapshot();
   const [slot, setSlot] = useState<number>();
-  useTheme(useSettings()?.theme);
+  const settings = useSettings();
+  useTheme(settings?.theme);
+  // Extra features off: the Advanced page has nothing to show
+  const advanced = settings?.advancedFeatures ?? true;
+  const visible = pages.filter((p) => p.id !== "advanced" || advanced);
+  useEffect(() => {
+    if (!advanced && page === "advanced") setPage("overview");
+  }, [advanced, page]);
 
   const openPorts = (n?: number) => {
     setSlot(n);
@@ -46,10 +53,11 @@ export default function App() {
           <span className="h-3 w-3 rounded-full bg-accent" />
           <span className="text-lg font-bold">fw-ams</span>
         </div>
-        {pages.map((p) => (
+        {visible.map((p) => (
           <button
             key={p.id}
             onClick={() => setPage(p.id)}
+            aria-current={page === p.id ? "page" : undefined}
             className={`flex items-center gap-3 rounded-lg px-3 py-2 text-left text-sm font-medium transition ${
               page === p.id
                 ? "bg-accent/10 text-accent"
@@ -80,7 +88,7 @@ export default function App() {
             {page === "ports" && <Ports s={snapshot} initialSlot={slot} />}
             {page === "thermal" && <ThermalPage s={snapshot} />}
             {page === "system" && <SystemPage s={snapshot} />}
-            {page === "advanced" && <AdvancedPage s={snapshot} />}
+            {page === "advanced" && advanced && <AdvancedPage s={snapshot} />}
           </>
         )}
         {page === "settings" && <SettingsPage />}

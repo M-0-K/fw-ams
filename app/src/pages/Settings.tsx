@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NumberInput, Row, Switch } from "../components/controls";
+import ResetPanel from "../components/ResetPanel";
+import { Button, ConfirmButton, Toast, useFlash } from "../components/ui";
 import type { AlertSettings } from "../bindings/AlertSettings";
 import type { BatterySettings } from "../bindings/BatterySettings";
 import type { Settings } from "../bindings/Settings";
 import type { Theme } from "../bindings/Theme";
-import { getSettings, setSettings } from "../api";
+import { forgetCards, setSettings, useSettings } from "../api";
 
 const themes: { id: Theme; label: string }[] = [
   { id: "system", label: "System" },
@@ -13,24 +15,30 @@ const themes: { id: Theme; label: string }[] = [
   { id: "dark", label: "Dunkel" },
 ];
 
+function Section({ title, actions, children }: { title: string; actions?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="card divide-y divide-slate-100 dark:divide-slate-800">
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
+        <h2 className="font-semibold">{title}</h2>
+        {actions}
+      </div>
+      {children}
+    </section>
+  );
+}
+
 export default function SettingsPage() {
+  const live = useSettings();
   const [settings, setLocal] = useState<Settings | null>(null);
-  const [status, setStatus] = useState<{ text: string; error?: boolean }>({ text: "" });
-  const statusTimer = useRef<number | undefined>(undefined);
+  const [msg, flash] = useFlash();
+  const [panel, setPanel] = useState<"disable" | "factory" | null>(null);
 
+  // Follow the backend, e.g. after a reset or a change on the Advanced page
   useEffect(() => {
-    getSettings()
-      .then(setLocal)
-      .catch((e) => setStatus({ text: `Fehler: ${e}`, error: true }));
-  }, []);
+    if (live) setLocal(live);
+  }, [live]);
 
-  if (!settings) return <div className="card text-slate-400">{status.text || "Lade Einstellungen…"}</div>;
-
-  const flash = (text: string, error = false) => {
-    setStatus({ text, error });
-    window.clearTimeout(statusTimer.current);
-    statusTimer.current = window.setTimeout(() => setStatus({ text: "" }), error ? 6000 : 2000);
-  };
+  if (!settings) return <div className="card text-slate-400">Lade Einstellungen…</div>;
 
   // Every change is saved right away
   const update = (patch: Partial<Settings>) => {
@@ -52,14 +60,7 @@ export default function SettingsPage() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      <div className="flex h-6 items-center justify-end text-sm">
-        <span className={status.error ? "text-red-500" : "text-slate-500"} role="status">
-          {status.text}
-        </span>
-      </div>
-
-      <section className="card divide-y divide-slate-100 dark:divide-slate-800">
-        <h2 className="pb-2 font-semibold">Darstellung</h2>
+      <Section title="Darstellung">
         <Row title="Farbschema" desc="System folgt der Windows- bzw. Linux-Einstellung.">
           <div className="flex rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800" role="radiogroup" aria-label="Farbschema">
             {themes.map((t) => (
@@ -79,10 +80,9 @@ export default function SettingsPage() {
             ))}
           </div>
         </Row>
-      </section>
+      </Section>
 
-      <section className="card divide-y divide-slate-100 dark:divide-slate-800">
-        <h2 className="pb-2 font-semibold">Allgemein</h2>
+      <Section title="Allgemein">
         <Row title="Mit dem System starten" desc="fw-ams startet bei der Anmeldung.">
           <Switch label="Mit dem System starten" checked={settings.autostart} onChange={(v) => update({ autostart: v })} />
         </Row>
@@ -103,51 +103,62 @@ export default function SettingsPage() {
             onCommit={(v) => update({ pollIntervalMs: Math.round(v * 1000) })}
           />
         </Row>
-      </section>
+      </Section>
 
-      <section className="card divide-y divide-slate-100 dark:divide-slate-800">
-        <h2 className="pb-2 font-semibold">Energiesparen bei niedrigem Akku</h2>
+      <Section title="Erweiterte Funktionen">
         <Row
-          title="Automatischer Sparmodus"
-          desc="Im Akkubetrieb unter dem Schwellwert sparsamer arbeiten; ab 5 % darüber oder am Netzteil wieder normal."
-        >
-          <NumberInput
-            value={b.saverPercent}
-            min={5}
-            max={50}
-            unit="%"
-            disabled={!b.saver}
-            onCommit={(v) => battery({ saverPercent: v })}
-          />
-          <Switch label="Automatischer Sparmodus" checked={b.saver} onChange={(v) => battery({ saver: v })} />
-        </Row>
-        <Row
-          title="Windows-Energiemodus umschalten"
-          desc="„Beste Energieeffizienz“ (Framework: 15 W dauerhaft), danach den vorherigen Modus wiederherstellen."
+          title="CPU-Tuning, Akkupflege und Sparmodus"
+          desc={
+            settings.advancedFeatures
+              ? "Funktionen, die das System verändern: Powerlimits, Ladelimit, Ladestrom, Energiemodus. Ausschalten stellt alles auf den Stand vor fw-ams zurück."
+              : "Aus: fw-ams überwacht nur und verändert nichts am System."
+          }
         >
           <Switch
-            label="Windows-Energiemodus umschalten"
-            checked={b.saverPowerMode}
-            disabled={!b.saver}
-            onChange={(v) => battery({ saverPowerMode: v })}
+            label="Erweiterte Funktionen"
+            checked={settings.advancedFeatures}
+            disabled={panel !== null}
+            onChange={(v) => (v ? update({ advancedFeatures: true }) : setPanel("disable"))}
           />
         </Row>
-        <div className="py-3 text-xs text-slate-500">
-          Zusätzlich gilt das Sparprofil unter Erweitert → Leistung &amp; Takt, sofern der Hilfsdienst installiert ist.
-          Ladelimit und Ladestrom stellst du unter Erweitert → Akkupflege ein.
-        </div>
-      </section>
+        {panel === "disable" && <ResetPanel factory={false} onClose={() => setPanel(null)} />}
+      </Section>
 
-      <section className="card divide-y divide-slate-100 dark:divide-slate-800">
-        <div className="flex items-center justify-between pb-2">
-          <h2 className="font-semibold">Benachrichtigungen</h2>
-          <button
-            onClick={testNotification}
-            className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
+      {settings.advancedFeatures && (
+        <Section title="Energiesparen bei niedrigem Akku">
+          <Row
+            title="Automatischer Sparmodus"
+            desc="Im Akkubetrieb unter dem Schwellwert sparsamer arbeiten; ab 5 % darüber oder am Netzteil wieder normal."
           >
-            Test-Benachrichtigung senden
-          </button>
-        </div>
+            <NumberInput
+              value={b.saverPercent}
+              min={5}
+              max={50}
+              unit="%"
+              disabled={!b.saver}
+              onCommit={(v) => battery({ saverPercent: v })}
+            />
+            <Switch label="Automatischer Sparmodus" checked={b.saver} onChange={(v) => battery({ saver: v })} />
+          </Row>
+          <Row
+            title="Windows-Energiemodus umschalten"
+            desc="„Beste Energieeffizienz“ (Framework: 15 W dauerhaft), danach den vorherigen Modus wiederherstellen."
+          >
+            <Switch
+              label="Windows-Energiemodus umschalten"
+              checked={b.saverPowerMode}
+              disabled={!b.saver}
+              onChange={(v) => battery({ saverPowerMode: v })}
+            />
+          </Row>
+          <div className="py-3 text-xs text-slate-500">
+            Zusätzlich gilt das Sparprofil unter Erweitert → Leistung &amp; Takt, sofern der Hilfsdienst installiert ist.
+            Ladelimit und Ladestrom stellst du unter Erweitert → Akkupflege ein.
+          </div>
+        </Section>
+      )}
+
+      <Section title="Benachrichtigungen" actions={<Button onClick={testNotification}>Test-Benachrichtigung senden</Button>}>
         <Row title="Akku fast leer" desc="Warnung beim Entladen unter dem Schwellwert.">
           <NumberInput
             value={a.batteryLowPercent}
@@ -201,7 +212,39 @@ export default function SettingsPage() {
         <Row title="Expansion Card gesteckt/entfernt" desc="Meldung, sobald sich ein Slot ändert.">
           <Switch label="Expansion Card gesteckt/entfernt" checked={a.cardChanges} onChange={(v) => alerts({ cardChanges: v })} />
         </Row>
-      </section>
+      </Section>
+
+      <Section title="Expansion Cards">
+        <Row
+          title="Gemerkte Karten"
+          desc="fw-ams merkt sich, welche Karte in welchem Slot steckt. Passive USB-A- und USB-C-Karten werden so auch angezeigt, wenn sie sich gerade nicht melden. Nach dem Umstecken hier vergessen."
+        >
+          <ConfirmButton
+            question="Alle vergessen?"
+            onConfirm={() =>
+              forgetCards()
+                .then(() => flash("Gemerkte Karten gelöscht"))
+                .catch((e) => flash(String(e), true))
+            }
+          >
+            Alle vergessen
+          </ConfirmButton>
+        </Row>
+      </Section>
+
+      <Section title="Zurücksetzen">
+        <Row
+          title="Werkseinstellungen"
+          desc="Macht alle Änderungen von fw-ams am System rückgängig und setzt die App auf den Auslieferungszustand."
+        >
+          <Button variant="danger" disabled={panel !== null} onClick={() => setPanel("factory")}>
+            Zurücksetzen…
+          </Button>
+        </Row>
+        {panel === "factory" && <ResetPanel factory onClose={() => setPanel(null)} />}
+      </Section>
+
+      <Toast msg={msg} />
     </div>
   );
 }

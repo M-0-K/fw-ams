@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import type { Snapshot } from "../bindings/Snapshot";
 import type { Slot } from "../bindings/Slot";
 import type { PdPort } from "../bindings/PdPort";
+import { forgetCards } from "../api";
 import LaptopDiagram from "../components/LaptopDiagram";
+import { Button, Notice } from "../components/ui";
 import { cardStyle, num } from "../format";
-import { describe, flow } from "../slots";
+import { describe, flow, isSilent, lastSeen } from "../slots";
 
 const confidenceLabel = {
   certain: "sicher erkannt",
@@ -100,26 +102,28 @@ function SlotDetail({ slot, port }: { slot: Slot; port?: PdPort }) {
             </span>
           )}
         </div>
-        <div className="text-xs text-slate-500">
-          {confidenceLabel[slot.card.confidence]}
-          {slot.card.usbId && ` · USB ${slot.card.usbId}`}
+        <div className="flex flex-wrap items-center gap-x-2 text-xs text-slate-500">
+          <span>
+            {confidenceLabel[slot.card.confidence]}
+            {slot.card.usbId && ` · USB ${slot.card.usbId}`}
+            {slot.card.rememberedMs !== null && ` · zuletzt sicher erkannt ${lastSeen(slot.card.rememberedMs)}`}
+          </span>
         </div>
       </div>
 
       {slot.hints.length > 0 && (
         <div className="space-y-2">
           {slot.hints.map((h, i) => (
-            <div
-              key={i}
-              className={`rounded-lg p-3 text-sm ${
-                h.severity === "warning"
-                  ? "bg-red-50 text-red-800 dark:bg-red-950 dark:text-red-200"
-                  : "bg-sky-50 text-sky-800 dark:bg-sky-950 dark:text-sky-200"
-              }`}
-            >
+            <Notice key={i} tone={h.severity === "warning" ? "error" : "info"}>
               {h.message}
-            </div>
+            </Notice>
           ))}
+        </div>
+      )}
+      {slot.card.rememberedMs !== null && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <Button onClick={() => forgetCards(slot.number).catch(() => {})}>Slot vergessen</Button>
+          <span className="text-xs text-slate-500">Danach zeigt der Slot nur noch, was sich gerade meldet.</span>
         </div>
       )}
 
@@ -227,7 +231,11 @@ export default function Ports({ s, initialSlot }: { s: Snapshot; initialSlot?: n
                 x.number === selected ? "bg-accent/10" : "hover:bg-slate-100 dark:hover:bg-slate-800"
               }`}
             >
-              <span className={`w-12 shrink-0 rounded-md py-0.5 text-center text-[11px] font-bold ${cardStyle[x.card.kind].color}`}>
+              <span
+                className={`w-12 shrink-0 rounded-md py-0.5 text-center text-[11px] font-bold ${cardStyle[x.card.kind].color} ${
+                  isSilent(x) ? "opacity-60" : ""
+                }`}
+              >
                 {cardStyle[x.card.kind].short}
               </span>
               <span className="w-28 shrink-0 text-xs text-slate-500">{x.location.label}</span>
@@ -236,7 +244,7 @@ export default function Ports({ s, initialSlot }: { s: Snapshot; initialSlot?: n
           ))}
         </div>
         <p className="max-w-xs text-center text-xs text-slate-500">
-          {"„?“ = aus PD-Status abgeleitet, roter Punkt = Warnung."}
+          „?“ = aus dem Port-Status abgeleitet, „↺“ = gemerkt (meldet sich gerade nicht), roter Punkt = Warnung.
         </p>
       </section>
       <section className="card">{slot ? <SlotDetail slot={slot} port={port} /> : "Keine Slots"}</section>

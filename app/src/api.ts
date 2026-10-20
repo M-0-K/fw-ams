@@ -6,12 +6,20 @@ import type { Settings } from "./bindings/Settings";
 import type { ChargeControl } from "./bindings/ChargeControl";
 import type { HistorySample } from "./bindings/HistorySample";
 import type { PowerMode } from "./bindings/PowerMode";
+import type { ResetReport } from "./bindings/ResetReport";
+import type { ResetRequest } from "./bindings/ResetRequest";
+import type { SetupInfo } from "./bindings/SetupInfo";
 import type { TunerConfig } from "./bindings/TunerConfig";
 import type { TunerState } from "./bindings/TunerState";
 import type { TunerView } from "./bindings/TunerView";
 
 export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<Settings>("set_settings", { settings });
+/** Forget the remembered card of one slot, or of all slots */
+export const forgetCards = (slot: number | null = null) => invoke<void>("forget_cards", { slot });
+/** Extra features off or factory reset; may show a UAC prompt when the service is removed */
+export const resetSystem = (request: ResetRequest) => invoke<ResetReport>("reset_system", { request });
+export const getSetup = () => invoke<SetupInfo>("get_setup");
 
 /** Latest snapshot pushed by the backend poller */
 export function useSnapshot(): Snapshot | null {

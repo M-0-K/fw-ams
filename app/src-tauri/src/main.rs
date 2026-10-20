@@ -130,6 +130,7 @@ fn main() {
             commands::get_charge_control,
             commands::charge_full_once,
             commands::get_tuner,
+            commands::get_setup,
             commands::get_history,
             commands::tuner_set_config,
             commands::tuner_reset,
