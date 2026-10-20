@@ -53,6 +53,10 @@ fn pawnio_module(app: &AppHandle) -> Option<PathBuf> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Uninstaller: undo the EC changes without starting the UI
+    if args.iter().any(|a| a == "--restore-system") {
+        std::process::exit(reset::headless());
+    }
     let use_mock = args.iter().any(|a| a == "--mock") || std::env::var_os("FW_AMS_MOCK").is_some();
     let started_minimized = args.iter().any(|a| a == "--minimized");
     // Debug aid: open the tray flyout right away

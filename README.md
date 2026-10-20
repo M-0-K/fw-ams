@@ -91,6 +91,10 @@ deinstalliert. „Werkseinstellungen“ setzt zusätzlich alle Einstellungen zur
 Autostart-Eintrag und löscht die gemerkten Karten. Jeder Schritt wird mit Ergebnis angezeigt.
 Den separat installierten PawnIO-Treiber entfernt fw-ams nicht.
 
+Beim Deinstallieren der App (Windows) passiert dasselbe automatisch: Der Deinstaller schließt
+fw-ams, gibt dem EC sein Ladelimit zurück, entfernt den Hilfsdienst samt Profilen (eine
+Admin-Abfrage, nur wenn er installiert ist) und den Autostart-Eintrag. Bei Updates bleibt alles.
+
 ## Kalibrierung der Slots
 
 Die Zuordnung USB-Root-Port → Slot steht in `crates/fw-ams-core/src/cards/slots.rs`.

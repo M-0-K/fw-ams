@@ -24,6 +24,20 @@ impl Paths {
     }
 }
 
+/// Must match `identifier` in tauri.conf.json: Tauri names the app config dir after it
+pub const IDENTIFIER: &str = "io.github.fw-ams";
+
+/// The app config dir without a running Tauri app (same rule as Tauri's `app_config_dir`)
+pub fn config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    base.map(|b| b.join(IDENTIFIER))
+}
+
 /// Missing or unreadable files give the default
 pub fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
     std::fs::read_to_string(path)
@@ -46,5 +60,16 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifier_matches_tauri_config() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], IDENTIFIER);
     }
 }

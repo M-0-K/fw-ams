@@ -7,9 +7,15 @@
 //! - power saver left, previous Windows power mode restored
 //! - settings: extra features off (or everything to defaults), autostart entry removed
 //! - card memory cleared (factory reset only)
+//!
+//! [`headless`] is the part the Windows uninstaller runs (`fw-ams-app --restore-system`); the
+//! service is removed by the uninstaller itself (`fw-ams-service uninstall --purge`).
 
+use crate::charge::ChargeController;
 use crate::settings::{BatterySettings, Settings};
 use crate::state::AppState;
+use crate::store::{self, Paths};
+use fw_ams_core::Collector;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use ts_rs::TS;
@@ -164,5 +170,28 @@ fn tuner_steps(state: &AppState, req: ResetRequest, report: &mut ResetReport) {
             StepResult::Skipped,
             "separat installiert – bei Bedarf unter Windows-Einstellungen → Apps deinstallieren".to_string(),
         );
+    }
+}
+
+/// `fw-ams-app --restore-system`, run by the uninstaller without UI: the charge limit goes back
+/// to the EC's own value and the charge current limit is removed. Needs no admin rights.
+/// Returns the process exit code.
+pub fn headless() -> i32 {
+    let Some(dir) = store::config_dir() else {
+        eprintln!("Kein App-Konfigurationsordner gefunden");
+        return 1;
+    };
+    let paths = Paths::new(&dir, false);
+    let collector = Collector::new();
+    let mut charge = ChargeController::new(false, paths.charge);
+    match charge.restore(Some(&collector)) {
+        Ok(done) => {
+            println!("Akku: {done}");
+            0
+        }
+        Err(e) => {
+            eprintln!("Akku: {e}");
+            1
+        }
     }
 }

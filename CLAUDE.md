@@ -51,7 +51,7 @@ Tuner: App → Named Pipe `\\.\pipe\fw-ams-tuner` → `fw-ams-service` → `Engi
 - `cargo test --workspace`: Tests **und** TS-Bindings neu erzeugen (`.cargo/config.toml` setzt `TS_RS_EXPORT_DIR`)
 - `cd app && npm run build`: tsc + vite (schneller Typcheck der UI)
 - `cd app && npm run tauri dev -- -- --mock [--flyout]`: App mit Mockdaten, Flyout sofort offen
-- App-Flags: `--mock` / `FW_AMS_MOCK`, `--flyout`, `--minimized`
+- App-Flags: `--mock` / `FW_AMS_MOCK`, `--flyout`, `--minimized`, `--restore-system` (ohne UI: Ladelimit zurück, Ladestrom-Limit weg; ruft der Deinstaller auf)
 - Mock ist ein FW13 AI 300: USB-C links hinten (Ladegerät), USB-A links vorne, HDMI rechts vorne, rechts hinten leer
 - Mock-Tuner: Strix-PM-Tabelle, Firmware setzt STAPM alle 90 s zurück, Fast-Limit auf 35 W gedeckelt (testet „wiederhergestellt“/„begrenzt“)
 - `cargo build -p fw-ams-service` + `scripts/fetch-pawnio-module.ps1`: Dienst und RyzenSMU-Modul für die Entwicklung
@@ -82,4 +82,6 @@ Tuner: App → Named Pipe `\\.\pipe\fw-ams-tuner` → `fw-ams-service` → `Engi
 - Kartengedächtnis (`cards.json`) wird mit `--mock` nicht gespeichert. Leerer Slot zeigt nur USB-A/USB-C aus dem Gedächtnis, aktive Karten nie (die brauchen Strom, leer = wirklich leer).
 - Poller liest Settings unter der Collector-Sperre; `reset.rs` hält sie beim Ändern, sonst schreibt ein laufender Poll alte Werte zurück.
 - Bestätigungen über `ConfirmButton`, nicht `window.confirm`.
+- Pipe-Anfragen haben 5 s Timeout (`client::request`, Worker-Thread + `CancelSynchronousIo`), danach 15 s Fail-fast. Der Dienst bedient jeden Client in einem eigenen Thread.
+- Deinstallation der App: `app/src-tauri/windows/hooks.nsh` (nicht bei Updates) schließt die App, ruft `--restore-system`, `fw-ams-service uninstall --purge` (UAC, nur wenn installiert) und löscht den Autostart-Eintrag. Datei mit UTF-8-BOM speichern (Umlaute).
 - Commits: auf Feature-Branch, je Phase/kleinem Schritt (Wunsch des Nutzers).
