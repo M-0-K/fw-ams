@@ -975,6 +975,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "Windows power plan values are only supported on Windows")]
     fn inactive_plan_index_follows_profile_and_reset() {
         let mut plan = SharedPlan::default();
         let mut e = engine_with(&plan, None);
@@ -1001,6 +1002,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "Windows power plan values are only supported on Windows")]
     fn plan_originals_survive_restart_and_uninstall() {
         let dir = temp_store("originals");
         let mut plan = SharedPlan::default();
@@ -1027,6 +1029,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "Windows power plan values are only supported on Windows")]
     fn power_source_switch_applies_dc_profile() {
         let mut e = engine();
         let mut cfg = e.config().clone();
