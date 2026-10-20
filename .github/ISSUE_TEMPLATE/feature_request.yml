@@ -1,0 +1,23 @@
+name: Idee / Wunsch
+description: Neue Funktion, Verbesserung oder Unterstützung für weitere Geräte
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Worum geht es?
+      description: Welches Problem soll gelöst werden, oder was fehlt dir?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Vorschlag
+      description: Wie könnte es aussehen oder funktionieren?
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Mithelfen
+      options:
+        - label: Ich kann auf meinem Gerät testen oder Messdaten liefern.
+        - label: Ich möchte einen Pull Request dafür schreiben.

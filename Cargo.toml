@@ -5,7 +5,8 @@ members = ["crates/fw-ams-core", "crates/fw-ams-tuner", "crates/fw-ams-service",
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "BSD-3-Clause"
+license = "GPL-3.0-or-later"
+authors = ["Moritz Kockert"]
 repository = "https://github.com/M-0-K/fw-ams"
 
 [workspace.dependencies]

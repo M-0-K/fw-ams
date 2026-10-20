@@ -2,7 +2,7 @@
 
 Monitoring für Framework-Laptops (Akku, USB-C PD, Thermik, Expansion Cards), Windows + Linux.
 Rust-Kern + Tauri-v2-App (React 19, Tailwind v4). **UI-Texte Deutsch, Code und Kommentare Englisch.**
-Mehr Nutzerdoku: README.md. Hier nur, was man zum schnellen Weiterentwickeln braucht.
+Lizenz GPL-3.0-or-later. Nutzerdoku: README.md, Entwicklerdoku: docs/development.md. Hier nur, was man zum schnellen Weiterentwickeln braucht.
 
 ## Karte
 | Pfad | Aufgabe |
@@ -57,6 +57,7 @@ Tuner: App → Named Pipe `\\.\pipe\fw-ams-tuner` → `fw-ams-service` → `Engi
 - `cargo build -p fw-ams-service` + `scripts/fetch-pawnio-module.ps1`: Dienst und RyzenSMU-Modul für die Entwicklung
 - `fw-ams smu info|dump`: SMU/PM-Tabelle prüfen; `target\debug\fw-ams-service.exe console` (Admin) zum Debuggen
 - `cd app && npm run bundle:windows`: Installer inkl. Dienst (Sidecar) und RyzenSMU.bin
+- Release: Version in `Cargo.toml`, `app/package.json`, `tauri.conf.json` + `CHANGELOG.md`-Abschnitt, dann Tag `vX.Y.Z` pushen → `.github/workflows/release.yml`
 
 ## Rezepte
 - **Neue Einstellung:** Feld in `settings.rs` (bzw. `AlertSettings`) + Default + ggf. `sanitized()` → `cargo test` → UI in `pages/Settings.tsx` (`Row` + `Switch`/`NumberInput`; speichert automatisch).

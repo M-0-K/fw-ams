@@ -29,6 +29,11 @@
     "active": true,
     "targets": ["nsis", "deb", "rpm", "appimage"],
     "category": "Utility",
+    "publisher": "Moritz Kockert",
+    "copyright": "Copyright (C) 2026 Moritz Kockert. GPL-3.0-or-later.",
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "../../LICENSE",
+    "homepage": "https://github.com/M-0-K/fw-ams",
     "shortDescription": "Framework laptop monitoring",
     "longDescription": "Battery, USB-C Power Delivery, thermals and expansion card detection for Framework laptops.",
     "icon": [

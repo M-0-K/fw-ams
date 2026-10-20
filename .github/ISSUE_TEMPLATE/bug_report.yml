@@ -1,0 +1,66 @@
+name: Fehler melden
+description: Etwas funktioniert nicht oder zeigt falsche Werte
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Danke für die Meldung! Sicherheitslücken bitte **nicht** hier, sondern vertraulich melden (siehe SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: Was ist passiert?
+      description: Was hast du erwartet, was ist stattdessen passiert? Schritte zum Nachvollziehen helfen sehr.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: fw-ams-Version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: model
+    attributes:
+      label: Gerät
+      options:
+        - Laptop 13 (AMD Ryzen AI 300)
+        - Laptop 13 (AMD Ryzen 7040)
+        - Laptop 13 (Intel)
+        - Laptop 16
+        - Laptop 12
+        - Desktop
+        - Anderes
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Betriebssystem und BIOS
+      description: Steht auf der Seite „System“.
+      placeholder: "Windows 11 24H2, BIOS 03.05"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Bereich
+      options:
+        - Akku / Ladegerät
+        - Ports & Expansion Cards
+        - Thermik
+        - Tray-Schnellansicht / Benachrichtigungen
+        - CPU-Tuning / Hilfsdienst
+        - Akkupflege / Sparmodus
+        - Zurücksetzen / Deinstallation
+        - Installation
+        - Sonstiges
+  - type: textarea
+    id: details
+    attributes:
+      label: Zusätzliche Infos
+      description: |
+        Je nach Bereich: Ausgabe von `fw-ams cards` / `fw-ams usb`, Erweitert → Ereignisse, Screenshot,
+        oder das Protokoll (%APPDATA%\io.github.fw-ams\logs bzw. %ProgramData%\fw-ams\service.log).
+      render: text

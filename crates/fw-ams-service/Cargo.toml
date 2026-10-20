@@ -3,6 +3,7 @@ name = "fw-ams-service"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 description = "Privileged helper service for fw-ams CPU tuning"
 
 [[bin]]
