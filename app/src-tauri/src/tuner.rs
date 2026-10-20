@@ -247,7 +247,9 @@ impl Tuner {
         }
     }
 
-    pub fn uninstall(&self) -> Result<(), String> {
+    /// Remove the service (one UAC prompt). It restores the Windows power plan values it
+    /// changed; `purge` also deletes the stored profiles and the log.
+    pub fn uninstall(&self, purge: bool) -> Result<(), String> {
         #[cfg(windows)]
         {
             let exe = self
@@ -255,15 +257,21 @@ impl Tuner {
                 .as_ref()
                 .filter(|p| p.is_file())
                 .ok_or("fw-ams-service.exe nicht gefunden")?;
-            match fw_ams_tuner::client::run_elevated(exe, "uninstall")? {
+            let args = if purge { "uninstall --purge" } else { "uninstall" };
+            match fw_ams_tuner::client::run_elevated(exe, args)? {
                 0 => Ok(()),
                 code => Err(format!("Deinstallation fehlgeschlagen (Code {code})")),
             }
         }
         #[cfg(not(windows))]
         {
+            let _ = purge;
             Err("Nur unter Windows verfügbar".into())
         }
+    }
+
+    pub fn is_mock(&self) -> bool {
+        matches!(self.backend, Backend::Mock { .. })
     }
 }
 

@@ -13,4 +13,8 @@ current: ChargeParam, designMah: number | null,
 /**
  * Unix ms of the last "charge to 100 % once"
  */
-fullOnceMs: number | null, };
+fullOnceMs: number | null, 
+/**
+ * Upper limit the EC had before fw-ams changed it (restored when management stops)
+ */
+originalMax: number | null, };

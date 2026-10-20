@@ -3,7 +3,12 @@ import type { AlertSettings } from "./AlertSettings";
 import type { BatterySettings } from "./BatterySettings";
 import type { Theme } from "./Theme";
 
-export type Settings = { pollIntervalMs: number, autostart: boolean, 
+export type Settings = { 
+/**
+ * Extra features that change the system: CPU tuning, charge limit/current, power saver.
+ * Off: fw-ams only monitors and writes nothing to EC, SMU or Windows power settings.
+ */
+advancedFeatures: boolean, pollIntervalMs: number, autostart: boolean, 
 /**
  * When started by autostart, stay in the tray
  */

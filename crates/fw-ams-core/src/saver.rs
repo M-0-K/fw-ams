@@ -24,6 +24,11 @@ impl SaverState {
         self.active
     }
 
+    /// Leave the saver without a snapshot (reset, quit). Returns true if it was active.
+    pub fn reset(&mut self) -> bool {
+        std::mem::take(&mut self.active)
+    }
+
     /// `threshold` is the activation level in percent, `None` disables the saver
     /// (and deactivates it if it was on).
     pub fn evaluate(&mut self, s: &Snapshot, threshold: Option<u8>) -> Option<SaverChange> {

@@ -1,5 +1,6 @@
 //! User settings, persisted as JSON in the app config directory.
 
+use crate::store;
 use fw_ams_core::alerts::AlertSettings;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -56,6 +57,9 @@ impl Default for BatterySettings {
 #[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct Settings {
+    /// Extra features that change the system: CPU tuning, charge limit/current, power saver.
+    /// Off: fw-ams only monitors and writes nothing to EC, SMU or Windows power settings.
+    pub advanced_features: bool,
     pub poll_interval_ms: u32,
     pub autostart: bool,
     /// When started by autostart, stay in the tray
@@ -68,6 +72,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            advanced_features: true,
             poll_interval_ms: 2000,
             autostart: false,
             start_minimized: true,
@@ -97,23 +102,16 @@ impl Settings {
         b.saver_percent = b.saver_percent.clamp(5, 50);
         self.alerts.weak_charger_watts = self.alerts.weak_charger_watts.clamp(5, 240);
         self.alerts.high_temp_celsius = self.alerts.high_temp_celsius.clamp(50, 110);
+        if !self.advanced_features {
+            // Nothing may touch the system while the extra features are off
+            self.battery = BatterySettings::default();
+        }
         self
     }
 }
 
 pub fn load(path: &Path) -> Settings {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
-        .unwrap_or_default()
-        .sanitized()
-}
-
-pub fn save(path: &Path, settings: &Settings) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(settings)?)
+    store::load::<Settings>(path).sanitized()
 }
 
 #[cfg(test)]
@@ -133,5 +131,15 @@ mod tests {
         assert_eq!(s.battery.charge_max, 25);
         assert_eq!(s.battery.charge_min, 20);
         assert_eq!(s.battery.charge_rate, 0.0);
+    }
+
+    #[test]
+    fn advanced_off_drops_battery_management() {
+        let mut s = Settings::default();
+        s.battery.manage_charge_limit = true;
+        s.battery.saver = true;
+        s.advanced_features = false;
+        let s = s.sanitized();
+        assert_eq!(s.battery, BatterySettings::default());
     }
 }
