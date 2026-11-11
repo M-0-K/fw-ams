@@ -60,6 +60,10 @@ pub struct SystemInfo {
     pub bios_version: Option<String>,
     pub ec_version: Option<String>,
     pub pd_versions: Vec<String>,
+    /// e.g. "Windows 11 Pro 25H2 (Build 26200.7171)"
+    pub os: Option<String>,
+    /// fw-ams version
+    pub app_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

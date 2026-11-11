@@ -7,7 +7,7 @@ use crate::model::*;
 use crate::source::ec::{
     self, EcSource, RawPdPower, RawPdState, RawPower, RawTemp, RawThermal, RawVersions, SmbiosInfo,
 };
-use crate::source::usb;
+use crate::source::{os_info, usb};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Collector {
@@ -15,6 +15,7 @@ pub struct Collector {
     smbios: SmbiosInfo,
     versions: RawVersions,
     layout: Vec<slots::SlotDef>,
+    os: Option<String>,
 }
 
 impl Default for Collector {
@@ -32,6 +33,7 @@ impl Collector {
             smbios,
             versions: RawVersions::default(),
             layout,
+            os: os_info::os_version(),
         };
         c.retry_ec();
         c
@@ -67,6 +69,8 @@ impl Collector {
             bios_version: self.smbios.bios_version.clone(),
             ec_version: self.versions.ec.clone(),
             pd_versions: self.versions.pd.clone(),
+            os: self.os.clone(),
+            app_version: env!("CARGO_PKG_VERSION").into(),
         };
 
         let Some(ec) = &self.ec else {

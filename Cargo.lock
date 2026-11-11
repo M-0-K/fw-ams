@@ -1463,6 +1463,7 @@ dependencies = [
  "serde_json",
  "starship-battery",
  "ts-rs",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

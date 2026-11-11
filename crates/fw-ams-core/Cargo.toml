@@ -14,5 +14,8 @@ log.workspace = true
 nusb.workspace = true
 ts-rs = "12"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Registry"] }
+
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 starship-battery = "0.12"
