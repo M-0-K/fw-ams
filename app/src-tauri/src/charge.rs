@@ -13,7 +13,12 @@ use fw_ams_core::Collector;
 use fw_ams_tuner::{now_ms, ParamStatus};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use ts_rs::TS;
+
+/// When the EC reports another limit than the one sent (it may reset it, e.g. around standby),
+/// the limit is written again, at most this often
+const REWRITE_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +81,7 @@ pub struct ChargeController {
     original: Original,
     view: ChargeControl,
     sent_limit: Option<(u8, u8)>,
+    last_limit_write: Option<Instant>,
     /// `Some(None)` = limit removed
     sent_current: Option<Option<u32>>,
     last_ac: Option<bool>,
@@ -101,6 +107,7 @@ impl ChargeController {
             },
             original,
             sent_limit: None,
+            last_limit_write: None,
             sent_current: None,
             last_ac: None,
             last_ec: false,
@@ -124,6 +131,14 @@ impl ChargeController {
                 log::warn!("charge restore file: {e}");
             }
         }
+    }
+
+    /// Write everything again on the next [`ChargeController::sync`], e.g. after standby:
+    /// the EC may have dropped the charge current limit or reset the charge limit meanwhile.
+    pub fn resync(&mut self) {
+        self.sent_limit = None;
+        self.sent_current = None;
+        self.restore_failed = false;
     }
 
     fn current_ma(cfg: &BatterySettings, design_mah: Option<u32>) -> Option<u32> {
@@ -161,6 +176,13 @@ impl ChargeController {
         self.view.max.desired = want_limit.map(|l| l.1 as f32);
         self.view.min.desired = want_limit.map(|l| l.0 as f32);
         if let Some((min, max)) = want_limit {
+            // The EC holds another upper limit than sent: it was reset behind our back
+            let drifted = self.sent_limit.is_some_and(|(_, sent)| ec_limit.is_some_and(|(_, own)| own != sent))
+                && self.last_limit_write.is_none_or(|t| t.elapsed() >= REWRITE_EVERY);
+            if drifted {
+                log::info!("EC reports charge limit {:?}, writing {max} % again", ec_limit.map(|l| l.1));
+                self.sent_limit = None;
+            }
             if ec_ok && self.sent_limit != Some((min, max)) {
                 // Remember the EC's own value once, before fw-ams changes it
                 if self.original.charge_limit.is_none() {
@@ -173,6 +195,7 @@ impl ChargeController {
                     None => Ok(()),
                 };
                 self.sent_limit = Some((min, max));
+                self.last_limit_write = Some(Instant::now());
                 for (p, v) in [(&mut self.view.max, max), (&mut self.view.min, min)] {
                     p.sent = Some(v as f32);
                     p.error = r.as_ref().err().cloned();
@@ -338,6 +361,35 @@ mod tests {
         assert_eq!(v.max.status, ParamStatus::Default);
         assert_eq!(v.current.sent, None);
         assert_eq!(v.original_max, None);
+    }
+
+    #[test]
+    fn resync_writes_again() {
+        let mut c = ChargeController::new(true, None);
+        c.sync(None, &mock::snapshot(), &managed(70));
+        assert_eq!(c.sent_limit, Some((0, 70)));
+        c.resync();
+        assert_eq!((c.sent_limit, c.sent_current), (None, None));
+        c.sync(None, &mock::snapshot(), &managed(70));
+        assert_eq!(c.sent_limit, Some((0, 70)));
+        assert_eq!(c.view().max.status, ParamStatus::Applied);
+    }
+
+    #[test]
+    fn limit_reset_by_the_ec_is_written_again() {
+        // Real EC path, but no EC in the test: a due rewrite shows up as `sent_limit == None`
+        let mut c = ChargeController::new(false, None);
+        let mut s = mock::snapshot();
+        s.battery.as_mut().unwrap().charge_limit_percent = Some(100);
+        c.sent_limit = Some((0, 70));
+        // Just written: give the EC time before writing again
+        c.last_limit_write = Some(Instant::now());
+        c.sync(None, &s, &managed(70));
+        assert_eq!(c.sent_limit, Some((0, 70)));
+        // A minute later the EC still reports 100 %: write again
+        c.last_limit_write = Instant::now().checked_sub(REWRITE_EVERY);
+        c.sync(None, &s, &managed(70));
+        assert_eq!(c.sent_limit, None);
     }
 
     #[test]

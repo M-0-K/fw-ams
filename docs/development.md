@@ -9,6 +9,7 @@
 | `crates/fw-ams-service` | Hilfsdienst (Windows, LocalSystem) für das CPU-Tuning |
 | `crates/fw-ams-cli` | CLI `fw-ams` zum Debuggen und Kalibrieren |
 | `app/` | Tauri-v2-App: Rust-Backend in `src-tauri/`, React-19-UI mit Tailwind v4 in `src/` |
+| `vendor/framework_lib` | `framework_lib` 0.6.6 mit Korrekturen (EC nach Standby, Linux ohne root), eingebunden über `[patch.crates-io]`; Änderungen in `PATCHES.md` |
 
 Eine ausführlichere Karte der Dateien, Datenflüsse und Stolpersteine steht in
 [`CLAUDE.md`](../CLAUDE.md) (auch für Menschen gedacht).

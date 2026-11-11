@@ -47,9 +47,12 @@ pub fn set_settings(app: AppHandle, state: State<SharedState>, settings: Setting
     state.commit_settings(&app, settings)
 }
 
+// Commands that take the collector, charge or card lock run off the main thread: the poller
+// holds these locks during EC access, and a slow EC must not freeze the windows.
+
 /// Forget the remembered card of one slot, or of all slots with `None`
-#[tauri::command]
-pub fn forget_cards(state: State<SharedState>, slot: Option<u8>) {
+#[tauri::command(async)]
+pub fn forget_cards(state: State<'_, SharedState>, slot: Option<u8>) {
     let mut cards = state.cards.lock().unwrap();
     cards.forget(slot);
     state.save_cards(&cards);
@@ -62,13 +65,13 @@ pub fn reset_system(app: AppHandle, state: State<'_, SharedState>, request: Rese
     reset::run(&app, &state, request)
 }
 
-#[tauri::command]
-pub fn get_charge_control(state: State<SharedState>) -> ChargeControl {
+#[tauri::command(async)]
+pub fn get_charge_control(state: State<'_, SharedState>) -> ChargeControl {
     state.charge.lock().unwrap().view()
 }
 
-#[tauri::command]
-pub fn charge_full_once(state: State<SharedState>) -> Result<ChargeControl, String> {
+#[tauri::command(async)]
+pub fn charge_full_once(state: State<'_, SharedState>) -> Result<ChargeControl, String> {
     let collector = state.collector.lock().unwrap();
     let mut charge = state.charge.lock().unwrap();
     charge.full_once(collector.as_ref())?;

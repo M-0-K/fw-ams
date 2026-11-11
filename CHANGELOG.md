@@ -14,6 +14,11 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
   (z. B. Ruhezustand) werden nicht mehr überbrückt. Zeitraum wählbar: 1, 5, 10 oder 30 min (#1)
 - Linux ohne root: Framework-Laptops wurden nicht erkannt (Modell, BIOS, EC-Zugriff fehlten), weil
   die SMBIOS-Tabelle nur für root lesbar ist. Die Angaben kommen jetzt aus `/sys/class/dmi/id` (#3)
+- Nach längerem Standby blieb die App ohne EC-Daten hängen, bis sie neu gestartet wurde, und
+  das Ladelimit wurde nicht mehr gesetzt. Ursache war ein Fehler in `framework_lib`: ein einziger
+  fehlgeschlagener Treiberaufruf legte den EC-Zugriff bis zum Neustart lahm. Jetzt verbindet sich
+  fw-ams neu, erkennt das Aufwachen und setzt Ladelimit und Ladestrom erneut; meldet der EC ein
+  anderes Ladelimit als eingestellt, wird es neu geschrieben (#4)
 
 ## [0.1.0] – 2026-10-20
 

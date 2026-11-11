@@ -10,8 +10,13 @@ use crate::source::ec::{
 use crate::source::{os_info, usb};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Polls in a row without any EC answer before the EC counts as lost (e.g. after standby)
+const EC_LOST_AFTER: u32 = 3;
+
 pub struct Collector {
     ec: Option<EcSource>,
+    /// Consecutive snapshots in which the EC answered nothing
+    ec_failures: u32,
     smbios: SmbiosInfo,
     versions: RawVersions,
     layout: Vec<slots::SlotDef>,
@@ -30,6 +35,7 @@ impl Collector {
         let layout = slots::layout(smbios.model);
         let mut c = Self {
             ec: None,
+            ec_failures: 0,
             smbios,
             versions: RawVersions::default(),
             layout,
@@ -48,9 +54,11 @@ impl Collector {
         self.ec.as_ref()
     }
 
-    /// Try to (re)open the EC, e.g. after the user installed the driver or udev rule.
+    /// Try to (re)open the EC, e.g. after the user installed the driver or udev rule, or
+    /// after it stopped answering.
     pub fn retry_ec(&mut self) -> bool {
         if self.ec.is_none() {
+            self.ec_failures = 0;
             self.ec = EcSource::open();
             if let Some(ec) = &self.ec {
                 self.versions = ec.versions();
@@ -60,7 +68,9 @@ impl Collector {
         self.ec.is_some()
     }
 
-    pub fn snapshot(&self) -> Snapshot {
+    /// Read everything. When the EC stops answering for [`EC_LOST_AFTER`] polls it is dropped,
+    /// the snapshot falls back to OS values and [`Collector::retry_ec`] reopens it later.
+    pub fn snapshot(&mut self) -> Snapshot {
         let usb = usb::list();
         let model = self.smbios.model;
         let system = SystemInfo {
@@ -79,6 +89,19 @@ impl Collector {
 
         let power = ec.power();
         let limit = ec.charge_limit();
+        if power.is_none() && limit.is_none() {
+            self.ec_failures += 1;
+            if self.ec_failures >= EC_LOST_AFTER {
+                log::warn!("EC stopped answering, falling back to OS values until it is back");
+                self.ec = None;
+                return self.fallback_snapshot(system, &usb);
+            }
+        } else {
+            self.ec_failures = 0;
+        }
+        let Some(ec) = &self.ec else {
+            return self.fallback_snapshot(system, &usb);
+        };
         let ports = build_ports(model, &ec.pd_states(), &ec.pd_power());
         let battery = power
             .as_ref()
