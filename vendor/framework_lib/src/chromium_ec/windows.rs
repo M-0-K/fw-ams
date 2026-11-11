@@ -1,5 +1,5 @@
 use num::FromPrimitive;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 /// Implementation to talk to DHowett's Windows Chrome EC driver
 #[allow(unused_imports)]
 use windows::{
@@ -27,8 +27,23 @@ lazy_static! {
     static ref DEVICE: Arc<Mutex<Option<DevHandle>>> = Arc::new(Mutex::new(None));
 }
 
+// fw-ams patch: never panic while holding the lock. A failed ioctl (e.g. around standby)
+// used to poison DEVICE, which made every later EC call panic until the process restarted.
+fn device() -> MutexGuard<'static, Option<DevHandle>> {
+    DEVICE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// fw-ams patch: close the handle after a failed ioctl so the next call reopens the driver
+fn reset(device: &mut Option<DevHandle>) {
+    if let Some(DevHandle(h)) = device.take() {
+        unsafe {
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
 fn init() -> bool {
-    let mut device = DEVICE.lock().unwrap();
+    let mut device = device();
     if (*device).is_some() {
         return true;
     }
@@ -97,25 +112,27 @@ pub fn read_memory(offset: u16, length: u16) -> EcResult<Vec<u8>> {
     let const_ptr = &mut rm as *const _ as *const ::core::ffi::c_void;
     let mut_ptr = &mut rm as *mut _ as *mut ::core::ffi::c_void;
     let ptr_size = std::mem::size_of::<CrosEcReadMem>() as u32;
-    let retb: u32 = 0;
+    let mut retb: u32 = 0;
     unsafe {
-        let device = DEVICE.lock().unwrap();
-        let device = if let Some(device) = *device {
+        let mut guard = device();
+        let device = if let Some(device) = *guard {
             device
         } else {
             return EcResult::Err(EcError::DeviceError("No EC device".to_string()));
         };
-        DeviceIoControl(
+        if let Err(err) = DeviceIoControl(
             device.0,
             IOCTL_CROSEC_RDMEM,
             Some(const_ptr),
             ptr_size,
             Some(mut_ptr),
             ptr_size,
-            Some(retb as *mut u32),
+            Some(&mut retb as *mut u32),
             None,
-        )
-        .unwrap();
+        ) {
+            reset(&mut guard);
+            return Err(EcError::DeviceError(format!("read_memory ioctl failed: {err:?}")));
+        }
     }
     let output = &rm.buffer[..(length as usize)];
     Ok(output.to_vec())
@@ -144,23 +161,25 @@ pub fn send_command(command: u16, command_version: u8, data: &[u8]) -> EcResult<
     let mut returned: u32 = 0;
 
     unsafe {
-        let device = DEVICE.lock().unwrap();
-        let device = if let Some(device) = *device {
+        let mut guard = device();
+        let device = if let Some(device) = *guard {
             device
         } else {
             return EcResult::Err(EcError::DeviceError("No EC device".to_string()));
         };
-        DeviceIoControl(
+        if let Err(err) = DeviceIoControl(
             device.0,
             IOCTL_CROSEC_XCMD,
             Some(const_ptr),
-            cmd_len.try_into().unwrap(),
+            cmd_len as u32,
             Some(mut_ptr),
-            out_len.try_into().unwrap(),
+            out_len as u32,
             Some(&mut returned as *mut u32),
             None,
-        )
-        .unwrap();
+        ) {
+            reset(&mut guard);
+            return Err(EcError::DeviceError(format!("send_command ioctl failed: {err:?}")));
+        }
     }
 
     match FromPrimitive::from_u32(cmd.result) {

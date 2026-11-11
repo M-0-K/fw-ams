@@ -115,6 +115,12 @@ pub fn is_framework() -> bool {
         return maker == "Framework";
     }
 
+    // fw-ams patch: the raw SMBIOS table is root-only, sysfs has the vendor for everyone
+    #[cfg(target_os = "linux")]
+    if let Some(vendor) = sysfs_dmi("sys_vendor") {
+        return vendor == "Framework";
+    }
+
     let Some(smbios) = get_smbios() else {
         return false;
     };
@@ -135,6 +141,12 @@ pub fn get_product_name() -> Option<String> {
         return Some(product);
     }
 
+    // fw-ams patch: readable without root, unlike /sys/firmware/dmi/tables
+    #[cfg(target_os = "linux")]
+    if let Some(product) = sysfs_dmi("product_name") {
+        return Some(product);
+    }
+
     let Some(smbios) = get_smbios() else {
         println!("Failed to find SMBIOS");
         return None;
@@ -143,6 +155,15 @@ pub fn get_product_name() -> Option<String> {
         Ok(Structure::System(sys)) if !sys.product.is_empty() => Some(sys.product.to_string()),
         _ => None,
     })
+}
+
+/// fw-ams patch: one value from /sys/class/dmi/id (world-readable for the non-serial fields)
+#[cfg(target_os = "linux")]
+pub fn sysfs_dmi(name: &str) -> Option<String> {
+    std::fs::read_to_string(format!("/sys/class/dmi/id/{}", name))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 pub fn get_baseboard_version() -> Option<ConfigDigit0> {

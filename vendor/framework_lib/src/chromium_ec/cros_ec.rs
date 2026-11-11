@@ -67,19 +67,32 @@ ioctl_readwrite!(cros_ec_mem, CROS_EC_IOC_MAGIC, 1, CrosEcReadMem);
 // TODO: Implement polling and re-try mechanism
 //ioctl_none!(cros_ec_eventmask, CROS_EC_IOC_MAGIC, 2);
 
-fn get_fildes() -> i32 {
-    let fd = CROS_EC_FD.lock().unwrap();
-    fd.as_ref().unwrap().as_raw_fd()
+// fw-ams patch: never panic while holding the lock (a poisoned lock broke every later EC
+// call until restart) and report a missing device as an error instead of panicking.
+fn device() -> std::sync::MutexGuard<'static, Option<std::fs::File>> {
+    CROS_EC_FD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn get_fildes() -> EcResult<i32> {
+    device()
+        .as_ref()
+        .map(|f| f.as_raw_fd())
+        .ok_or_else(|| EcError::DeviceError(format!("{} not open", DEV_PATH)))
+}
+
+/// fw-ams patch: drop the file after a failed ioctl so the next call reopens it
+fn reset() {
+    *device() = None;
 }
 
 // TODO: Also de-init
 fn init() {
-    let mut device = CROS_EC_FD.lock().unwrap();
+    let mut device = device();
     if (*device).is_some() {
         return;
     }
     match std::fs::File::open(DEV_PATH) {
-        Err(why) => println!("Failed to open {}. Because: {:?}", DEV_PATH, why),
+        Err(why) => debug!("Failed to open {}. Because: {:?}", DEV_PATH, why),
         Ok(file) => *device = Some(file),
     };
     // 2. Read max 80 bytes and check if equal to "1.0.0"
@@ -129,9 +142,13 @@ fn read_mem_directly(offset: u16, length: u16) -> EcResult<Vec<u8>> {
         length: length as u32,
         out_buffer: [0; EC_MEMMAP_SIZE as usize],
     };
-    unsafe {
-        // TODO: Check result
-        let _result = cros_ec_mem(get_fildes(), &mut data).unwrap();
+    let fd = get_fildes()?;
+    if let Err(err) = unsafe { cros_ec_mem(fd, &mut data) } {
+        reset();
+        return Err(EcError::DeviceError(format!(
+            "ioctl to read EC memory failed with {:?}",
+            err
+        )));
     }
     Ok(data.out_buffer[0..length as usize].to_vec())
 }
@@ -158,8 +175,9 @@ pub fn send_command(command: u16, command_version: u8, data: &[u8]) -> EcResult<
     cmd.data[0..size].copy_from_slice(data);
     let cmd_ptr = &mut cmd as *mut _ as *mut _CrosEcCommandV2;
 
+    let fd = get_fildes()?;
     unsafe {
-        let result = cros_ec_cmd(get_fildes(), cmd_ptr);
+        let result = cros_ec_cmd(fd, cmd_ptr);
         let status: Option<EcResponseStatus> = FromPrimitive::from_u32(cmd.result);
         match &status {
             None => return Err(EcError::UnknownResponseCode(cmd.result)),
