@@ -300,10 +300,17 @@ pub fn read_smbios() -> SmbiosInfo {
     let platform = guarded("get_platform", smbios::get_platform);
     let is_framework = guarded("is_framework", || Some(smbios::is_framework())).unwrap_or(false);
     let product = guarded("get_product_name", smbios::get_product_name);
-    let bios_version = guarded("bios_version", || {
-        smbios::get_smbios()?.structures().find_map(|s| match s {
-            Ok(dmidecode::Structure::Bios(b)) => Some(b.bios_version.to_string()),
-            _ => None,
+    // Linux: sysfs is readable without root, the raw SMBIOS table is not
+    #[cfg(target_os = "linux")]
+    let sysfs_bios = smbios::sysfs_dmi("bios_version");
+    #[cfg(not(target_os = "linux"))]
+    let sysfs_bios: Option<String> = None;
+    let bios_version = sysfs_bios.or_else(|| {
+        guarded("bios_version", || {
+            smbios::get_smbios()?.structures().find_map(|s| match s {
+                Ok(dmidecode::Structure::Bios(b)) => Some(b.bios_version.to_string()),
+                _ => None,
+            })
         })
     });
     SmbiosInfo {
