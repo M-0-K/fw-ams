@@ -1,0 +1,752 @@
+//! Module to factor out commandline interaction
+//! This way we can use it in the regular OS commandline tool on Linux and Windows,
+//! as well as on the UEFI shell tool.
+use std::io;
+use std::io::Write;
+use std::path::PathBuf;
+
+use clap::builder::TypedValueParser;
+use clap::error::ErrorKind;
+use clap::Parser;
+use clap::{command, Arg, Args, FromArgMatches};
+use clap_complete::{generate, Shell};
+use clap_num::maybe_hex;
+
+use crate::chromium_ec::commands::SetGpuSerialMagic;
+use crate::chromium_ec::CrosEcDriverType;
+use crate::commandline::{
+    Cli, ClickForceArg, ConsoleArg, FpBrightnessArg, HardwareDeviceType, InputDeckModeArg,
+    LogLevel, RebootEcArg, TabletModeArg,
+};
+
+/// Swiss army knife for Framework laptops
+#[derive(Parser)]
+#[command(arg_required_else_help = true)]
+struct ClapCli {
+    #[command(flatten)]
+    verbosity: clap_verbosity_flag::Verbosity,
+
+    /// List current firmware versions
+    #[arg(long)]
+    versions: bool,
+
+    /// Show tool version information (Add -vv for more details)
+    #[arg(long)]
+    version: bool,
+
+    /// Show features support by the firmware
+    #[arg(long)]
+    features: bool,
+
+    /// Display the UEFI ESRT table
+    #[arg(long)]
+    esrt: bool,
+
+    /// Device type to compare the --compare-version string against
+    #[clap(value_enum)]
+    #[arg(long)]
+    device: Option<HardwareDeviceType>,
+
+    /// Version to compare device firmware version with
+    #[arg(long)]
+    compare_version: Option<String>,
+
+    /// Show current power status of battery and AC (Add -vv for more details)
+    #[arg(long)]
+    power: bool,
+
+    /// Show detailed smart battery information, or load from dump file
+    #[arg(long, value_name = "FILE")]
+    smartbattery: Option<Option<PathBuf>>,
+
+    /// Authenticate smart battery (requires unseal and auth keys)
+    #[arg(long)]
+    smartbattery_auth: bool,
+
+    /// Print thermal information (Temperatures and Fan speed)
+    #[arg(long)]
+    thermal: bool,
+
+    /// Print thermal thresholds of the temperature sensors
+    #[arg(long)]
+    thermalget: bool,
+
+    /// Set thermal thresholds of a sensor in degrees Celsius:
+    /// <SENSOR> <WARN> [<HIGH> [<HALT> [<FAN_OFF> [<FAN_MAX>]]]]
+    /// (-1 keeps the current threshold, 0 disables it)
+    #[clap(num_args = 2..=6, allow_negative_numbers = true)]
+    #[arg(long)]
+    thermalset: Vec<i32>,
+
+    /// Print sensor information (ALS, G-Sensor)
+    #[arg(long)]
+    sensors: bool,
+
+    /// Set fan duty cycle (0-100%)
+    #[clap(num_args=..=2)]
+    #[arg(long)]
+    fansetduty: Vec<u32>,
+
+    /// Set fan RPM (limited by EC fan table max RPM)
+    #[clap(num_args=..=2)]
+    #[arg(long)]
+    fansetrpm: Vec<u32>,
+
+    /// Turn on automatic fan speed control
+    #[arg(long)]
+    autofanctrl: Option<Option<u8>>,
+
+    /// Show USB-C PD port state
+    #[arg(long)]
+    pdports: bool,
+
+    /// Show PD port info (generic Chromium EC)
+    #[arg(long)]
+    pdports_chromebook: bool,
+
+    /// Show info from SMBIOS (Only on UEFI)
+    #[arg(long)]
+    info: bool,
+
+    /// Show Intel ME information (from SMBIOS type 0xDB).
+    /// Optionally provide a dmidecode binary dump file path.
+    #[arg(long)]
+    meinfo: Option<Option<String>>,
+
+    /// Show details about the PD controllers
+    #[arg(long)]
+    pd_info: bool,
+
+    /// Reset a specific PD controller (for debugging only)
+    #[arg(long)]
+    pd_reset: Option<u8>,
+
+    /// Disable all ports on a specific PD controller (for debugging only)
+    #[arg(long)]
+    pd_disable: Option<u8>,
+
+    /// Enable all ports on a specific PD controller (for debugging only)
+    #[arg(long)]
+    pd_enable: Option<u8>,
+
+    /// Show details about connected DP or HDMI Expansion Cards
+    #[arg(long)]
+    dp_hdmi_info: bool,
+
+    /// Update the DisplayPort or HDMI Expansion Card
+    #[arg(long, value_name = "UPDATE_BIN")]
+    dp_hdmi_update: Option<std::path::PathBuf>,
+
+    /// Show details about connected Audio Expansion Cards (Needs root privileges)
+    #[arg(long)]
+    audio_card_info: bool,
+
+    /// Show privacy switch statuses (camera and microphone)
+    #[arg(long)]
+    privacy: bool,
+
+    /// Parse versions from PD firmware binary file
+    #[arg(long)]
+    pd_bin: Option<std::path::PathBuf>,
+
+    /// Parse versions from EC firmware binary file
+    #[arg(long)]
+    ec_bin: Option<std::path::PathBuf>,
+
+    /// Parse UEFI Capsule information from binary file
+    #[arg(long)]
+    capsule: Option<std::path::PathBuf>,
+
+    /// Dump extracted UX capsule bitmap image to a file
+    #[arg(long)]
+    dump: Option<std::path::PathBuf>,
+
+    /// Parse UEFI Capsule information from binary file
+    #[arg(long)]
+    h2o_capsule: Option<std::path::PathBuf>,
+
+    /// Dump EC flash contents
+    #[arg(long)]
+    dump_ec_flash: Option<std::path::PathBuf>,
+
+    /// Flash full EC flash with new firmware from file - may render your hardware unbootable!
+    #[arg(long)]
+    flash_full_ec: Option<std::path::PathBuf>,
+
+    /// Flash EC (RO+RW) with new firmware from file - may render your hardware unbootable!
+    #[arg(long)]
+    flash_ec: Option<std::path::PathBuf>,
+
+    /// Flash EC with new RO firmware from file - may render your hardware unbootable!
+    #[arg(long)]
+    flash_ro_ec: Option<std::path::PathBuf>,
+
+    /// Flash EC with new RW firmware from file
+    #[arg(long)]
+    flash_rw_ec: Option<std::path::PathBuf>,
+
+    /// Show status of intrusion switch
+    #[arg(long)]
+    intrusion: bool,
+
+    /// Show status of the input modules
+    #[arg(long)]
+    inputdeck: bool,
+
+    /// Set input deck power mode [possible values: auto, off, on, reset] (Laptop 12, 13, 16)
+    #[arg(long)]
+    inputdeck_mode: Option<InputDeckModeArg>,
+
+    /// Show status of the expansion bay (Laptop 16 only)
+    #[arg(long)]
+    expansion_bay: bool,
+
+    /// Get or set max charge limit
+    #[arg(long)]
+    charge_limit: Option<Option<u8>>,
+
+    /// Set max charge current limit
+    #[arg(long)]
+    #[clap(num_args = 1..=2)]
+    charge_current_limit: Vec<u32>,
+
+    /// Set max charge current limit
+    #[arg(long)]
+    #[clap(num_args = 1..=2)]
+    charge_rate_limit: Vec<f32>,
+
+    /// Get GPIO value by name or all, if no name provided
+    #[arg(long)]
+    get_gpio: Option<Option<String>>,
+
+    /// Get or set fingerprint LED brightness level
+    #[arg(long)]
+    fp_led_level: Option<Option<FpBrightnessArg>>,
+
+    /// Get or set fingerprint LED brightness percentage
+    #[arg(long)]
+    fp_brightness: Option<Option<u8>>,
+
+    /// Set keyboard backlight percentage or get, if no value provided
+    #[arg(long)]
+    kblight: Option<Option<u8>>,
+
+    /// Remap a key by changing the scancode
+    #[arg(long, value_parser=maybe_hex::<u16>)]
+    #[clap(num_args = 3)]
+    remap_key: Vec<u16>,
+
+    /// Set the color of <key> to <RGB>. Multiple colors for adjacent keys can be set at once.
+    /// <key> <RGB> [<RGB> ...]
+    /// Example: 0 0xFF000 0x00FF00 0x0000FF
+    #[clap(num_args = 2..)]
+    #[arg(long, value_parser=maybe_hex::<u64>, value_names(["START", "HEXCOLOR"]))]
+    rgbkbd: Vec<u64>,
+
+    /// Control PS2 touchpad emulation (DEBUG COMMAND, if touchpad not working, reboot system)
+    #[clap(value_enum, hide(true))]
+    #[arg(long)]
+    ps2_enable: Option<bool>,
+
+    /// Set tablet mode override
+    #[clap(value_enum)]
+    #[arg(long)]
+    tablet_mode: Option<TabletModeArg>,
+
+    /// Enable/disable touchscreen
+    #[clap(value_enum)]
+    #[arg(long)]
+    touchscreen_enable: Option<bool>,
+
+    /// Set touchpad haptic feedback intensity
+    #[arg(
+        long,
+        value_name = "INTENSITY",
+        value_parser = clap::builder::PossibleValuesParser::new(["0", "25", "50", "75", "100"])
+             .try_map(|s| {
+                 s.parse::<u8>()
+                     .map_err(|_| format!("invalid haptic intensity value: {s}"))
+             }),
+    )]
+    haptic_intensity: Option<u8>,
+
+    /// Set touchpad click force / sensitivity
+    #[clap(value_enum)]
+    #[arg(long)]
+    click_force: Option<ClickForceArg>,
+
+    /// Check stylus battery level (USI 2.0 stylus only)
+    #[clap(value_enum)]
+    #[arg(long)]
+    stylus_battery: bool,
+
+    /// Get EC console, choose whether recent or to follow the output
+    #[clap(value_enum)]
+    #[arg(long)]
+    console: Option<ConsoleArg>,
+
+    /// Control EC RO/RW jump
+    #[clap(value_enum)]
+    #[arg(long)]
+    reboot_ec: Option<RebootEcArg>,
+
+    /// Get or set EC hibernate delay (S5 to G3)
+    #[clap(value_enum)]
+    #[arg(long)]
+    ec_hib_delay: Option<Option<u32>>,
+
+    /// Show system info (reset flags, current image, locked state)
+    #[arg(long)]
+    sysinfo: bool,
+
+    #[arg(long)]
+    uptimeinfo: bool,
+
+    #[arg(long)]
+    s0ix_counter: bool,
+
+    /// Check basic communication with EC
+    #[arg(long)]
+    hello: bool,
+
+    /// Show EC host command protocol info
+    #[arg(long)]
+    protoinfo: bool,
+
+    /// Show current EC switch positions (lid, power button, ...)
+    #[arg(long)]
+    switches: bool,
+
+    /// Show history of port 80 writes (POST codes)
+    #[arg(long)]
+    port80read: bool,
+
+    /// Show saved EC panic info
+    #[arg(long)]
+    panicinfo: bool,
+
+    /// Hash a file of arbitrary data
+    #[arg(long)]
+    hash: Option<std::path::PathBuf>,
+
+    /// Select which driver is used. By default portio is used
+    #[clap(value_enum)]
+    #[arg(long)]
+    driver: Option<CrosEcDriverType>,
+
+    /// Specify I2C addresses of the PD chips (Advanced)
+    #[clap(number_of_values = 3, requires("pd_ports"))]
+    #[arg(long)]
+    pd_addrs: Vec<u16>,
+
+    /// Specify I2C ports of the PD chips (Advanced)
+    #[clap(number_of_values = 3, requires("pd_addrs"))]
+    #[arg(long)]
+    pd_ports: Vec<u8>,
+
+    /// Run self-test to check if interaction with EC is possible
+    #[arg(long, short)]
+    test: bool,
+
+    /// Run self-test to check if interaction with retimers is possible
+    #[arg(long)]
+    test_retimer: bool,
+
+    /// Print all board IDs
+    #[arg(long)]
+    boardid: bool,
+
+    /// Force execution of an unsafe command - may render your hardware unbootable!
+    #[arg(long, short)]
+    force: bool,
+
+    /// Simulate execution of a command (e.g. --flash-ec)
+    #[arg(long)]
+    dry_run: bool,
+
+    /// File to write to the gpu EEPROM
+    #[arg(long)]
+    flash_gpu_descriptor_file: Option<std::path::PathBuf>,
+
+    /// File to dump the gpu EEPROM to
+    #[arg(long)]
+    dump_gpu_descriptor_file: Option<std::path::PathBuf>,
+
+    /// File to validate the gpu EEPROM against
+    #[arg(long)]
+    validate_gpu_descriptor_file: Option<std::path::PathBuf>,
+
+    /// Show NVIDIA GPU information (Laptop 16 only)
+    #[arg(long)]
+    nvidia: bool,
+
+    /// Send an EC host command. Args: <CMD_ID> <VERSION> [DATA...]
+    #[arg(long, value_parser=maybe_hex::<u16>)]
+    #[clap(num_args = 2..)]
+    host_command: Vec<u16>,
+
+    /// Generate shell completions and print to stdout
+    #[arg(long, value_name = "SHELL", hide = true)]
+    generate_completions: Option<Shell>,
+
+    /// Generate man page and print to stdout
+    #[arg(long, hide = true)]
+    generate_manpage: bool,
+}
+
+/// Prose for the DESCRIPTION section of the man page.
+/// Only set when generating the man page, so it doesn't show up in --help.
+const MANPAGE_DESCRIPTION: &str = "framework_tool is a command-line utility for interacting \
+with Framework Computer laptops and desktops.\n\n\
+It communicates with the Embedded Controller (EC) to query firmware versions, battery and \
+USB-C status, thermal data, privacy and intrusion switches, and expansion card details. \
+It can also adjust system settings and flash EC firmware.\n\n\
+Most operations require root privileges.";
+
+/// EXAMPLES section of the man page in roff man(7) syntax.
+/// clap has no concept of examples, so it's appended after the generated sections.
+const MANPAGE_EXAMPLES: &str = r#".SH EXAMPLES
+List all firmware versions:
+.PP
+.RS 4
+.nf
+# framework_tool \-\-versions
+.fi
+.RE
+.PP
+Show battery and AC status:
+.PP
+.RS 4
+.nf
+# framework_tool \-\-power
+.fi
+.RE
+.PP
+Get keyboard backlight level:
+.PP
+.RS 4
+.nf
+# framework_tool \-\-kblight
+.fi
+.RE
+.PP
+Set keyboard backlight to 50%:
+.PP
+.RS 4
+.nf
+# framework_tool \-\-kblight 50
+.fi
+.RE
+.PP
+Set battery charge limit to 80%:
+.PP
+.RS 4
+.nf
+# framework_tool \-\-charge\-limit 80
+.fi
+.RE
+.PP
+Parse version from EC firmware file:
+.PP
+.RS 4
+.nf
+$ framework_tool \-\-ec\-bin ec.bin
+.fi
+.RE
+.PP
+Flash EC RW firmware:
+.PP
+.RS 4
+.nf
+# framework_tool \-\-flash\-rw\-ec ec_rw.bin
+.fi
+.RE
+.PP
+"#;
+
+/// Generate a man page from the clap definition and print it to stdout
+fn generate_manpage(cmd: clap::Command) {
+    let cmd = cmd.long_about(MANPAGE_DESCRIPTION);
+    let man = clap_mangen::Man::new(cmd);
+    let mut out = io::stdout();
+    man.render_title(&mut out).unwrap();
+    man.render_name_section(&mut out).unwrap();
+    man.render_synopsis_section(&mut out).unwrap();
+    man.render_description_section(&mut out).unwrap();
+    man.render_options_section(&mut out).unwrap();
+    out.write_all(MANPAGE_EXAMPLES.as_bytes()).unwrap();
+}
+
+/// Parse a list of commandline arguments and return the struct
+pub fn parse(args: &[String]) -> Cli {
+    // Step 1 - Define args that can't be derived
+    let cli = command!()
+        .name("framework_tool")
+        .arg(Arg::new("fgd").long("flash-gpu-descriptor").num_args(2))
+        .disable_version_flag(true);
+    // Step 2 - Define args from derived struct
+    let mut cli = ClapCli::augment_args(cli);
+
+    // Handle --generate-manpage early (generates and exits)
+    if args.iter().any(|a| a == "--generate-manpage") {
+        generate_manpage(cli);
+        std::process::exit(0);
+    }
+
+    // Handle --generate-completions early (generates and exits)
+    if let Some(shell_arg) = args.iter().position(|a| a == "--generate-completions") {
+        if let Some(shell_str) = args.get(shell_arg + 1) {
+            if let Ok(shell) = shell_str.parse::<Shell>() {
+                generate(shell, &mut cli, "framework_tool", &mut io::stdout());
+                std::process::exit(0);
+            }
+        }
+    }
+
+    // Step 3 - Parse args that can't be derived
+    let matches = cli.clone().get_matches_from(args);
+    let fgd = matches
+        .get_many::<String>("fgd")
+        .unwrap_or_default()
+        .map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    let flash_gpu_descriptor = if !fgd.is_empty() {
+        let hex_magic = if let Some(hex_magic) = fgd[0].strip_prefix("0x") {
+            u8::from_str_radix(hex_magic, 16)
+        } else {
+            // Force parse error
+            u8::from_str_radix("", 16)
+        };
+
+        let magic = if let Ok(magic) = fgd[0].parse::<u8>() {
+            magic
+        } else if let Ok(hex_magic) = hex_magic {
+            hex_magic
+        } else if fgd[0].to_uppercase() == "GPU" {
+            SetGpuSerialMagic::WriteGPUConfig as u8
+        } else if fgd[0].to_uppercase() == "SSD" {
+            SetGpuSerialMagic::WriteSSDConfig as u8
+        } else {
+            cli.error(
+                ErrorKind::InvalidValue,
+                "First argument of --flash-gpu-descriptor must be an integer or one of: 'GPU', 'SSD'",
+            )
+            .exit();
+        };
+        if fgd[1].len() != 18 {
+            cli.error(
+                ErrorKind::InvalidValue,
+                "Second argument of --flash-gpu-descriptor must be an 18 digit serial number",
+            )
+            .exit();
+        }
+        Some((magic, fgd[1].to_string()))
+    } else {
+        None
+    };
+
+    // Step 4 - Parse from derived struct
+    let args = ClapCli::from_arg_matches(&matches)
+        .map_err(|err| err.exit())
+        .unwrap();
+
+    let pd_addrs = match args.pd_addrs.len() {
+        3 => Some((args.pd_addrs[0], args.pd_addrs[1], args.pd_addrs[2])),
+        0 => None,
+        // Checked by clap
+        _ => unreachable!(),
+    };
+    let pd_ports = match args.pd_ports.len() {
+        3 => Some((args.pd_ports[0], args.pd_ports[1], args.pd_ports[2])),
+        0 => None,
+        // Checked by clap
+        _ => unreachable!(),
+    };
+    let fansetduty = match args.fansetduty.len() {
+        2 => Some((Some(args.fansetduty[0]), args.fansetduty[1])),
+        1 => Some((None, args.fansetduty[0])),
+        _ => None,
+    };
+    let fansetrpm = match args.fansetrpm.len() {
+        2 => Some((Some(args.fansetrpm[0]), args.fansetrpm[1])),
+        1 => Some((None, args.fansetrpm[0])),
+        _ => None,
+    };
+    let charge_current_limit = match args.charge_current_limit.len() {
+        2 => Some((
+            args.charge_current_limit[0],
+            Some(args.charge_current_limit[1]),
+        )),
+        1 => Some((args.charge_current_limit[0], None)),
+        _ => None,
+    };
+    let charge_rate_limit = match args.charge_rate_limit.len() {
+        2 => Some((args.charge_rate_limit[0], Some(args.charge_rate_limit[1]))),
+        1 => Some((args.charge_rate_limit[0], None)),
+        _ => None,
+    };
+    let remap_key = match args.remap_key.len() {
+        3 => Some((
+            args.remap_key[0] as u8,
+            args.remap_key[1] as u8,
+            args.remap_key[2],
+        )),
+        _ => None,
+    };
+    let host_command = if args.host_command.len() >= 2 {
+        let cmd_ver = if let Ok(cmd_ver) = u8::try_from(args.host_command[1]) {
+            cmd_ver
+        } else {
+            cli.error(
+                ErrorKind::InvalidValue,
+                "Second argument of --host-command must be a one byte command version",
+            )
+            .exit();
+        };
+        Some((
+            args.host_command[0],
+            cmd_ver,
+            args.host_command[2..]
+                .iter()
+                .map(|&x| {
+                    if let Ok(x) = u8::try_from(x) {
+                        x
+                    } else {
+                        cli.error(
+                            ErrorKind::InvalidValue,
+                            "All payload values of --host-command must be one byte each",
+                        )
+                        .exit();
+                    }
+                })
+                .collect(),
+        ))
+    } else {
+        None
+    };
+
+    Cli {
+        verbosity: LogLevel(args.verbosity.log_level_filter()),
+        versions: args.versions,
+        version: args.version,
+        features: args.features,
+        esrt: args.esrt,
+        device: args.device,
+        compare_version: args.compare_version,
+        power: args.power,
+        smartbattery: args
+            .smartbattery
+            .map(|opt| opt.map(|x| x.into_os_string().into_string().unwrap())),
+        smartbattery_auth: args.smartbattery_auth,
+        thermal: args.thermal,
+        thermalget: args.thermalget,
+        thermalset: if args.thermalset.is_empty() {
+            None
+        } else {
+            Some(args.thermalset.clone())
+        },
+        sensors: args.sensors,
+        fansetduty,
+        fansetrpm,
+        autofanctrl: args.autofanctrl,
+        pdports: args.pdports,
+        pdports_chromebook: args.pdports_chromebook,
+        pd_info: args.pd_info,
+        pd_reset: args.pd_reset,
+        pd_disable: args.pd_disable,
+        pd_enable: args.pd_enable,
+        dp_hdmi_info: args.dp_hdmi_info,
+        dp_hdmi_update: args
+            .dp_hdmi_update
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        audio_card_info: args.audio_card_info,
+        privacy: args.privacy,
+        pd_bin: args
+            .pd_bin
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        ec_bin: args
+            .ec_bin
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        capsule: args
+            .capsule
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        dump: args.dump.map(|x| x.into_os_string().into_string().unwrap()),
+        h2o_capsule: args
+            .h2o_capsule
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        dump_ec_flash: args
+            .dump_ec_flash
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        flash_full_ec: args
+            .flash_full_ec
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        flash_ec: args
+            .flash_ec
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        flash_ro_ec: args
+            .flash_ro_ec
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        flash_rw_ec: args
+            .flash_rw_ec
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        intrusion: args.intrusion,
+        inputdeck: args.inputdeck,
+        inputdeck_mode: args.inputdeck_mode,
+        expansion_bay: args.expansion_bay,
+        charge_limit: args.charge_limit,
+        charge_current_limit,
+        charge_rate_limit,
+        get_gpio: args.get_gpio,
+        fp_led_level: args.fp_led_level,
+        fp_brightness: args.fp_brightness,
+        kblight: args.kblight,
+        remap_key,
+        rgbkbd: args.rgbkbd,
+        ps2_enable: args.ps2_enable,
+        tablet_mode: args.tablet_mode,
+        touchscreen_enable: args.touchscreen_enable,
+        haptic_intensity: args.haptic_intensity,
+        click_force: args.click_force,
+        stylus_battery: args.stylus_battery,
+        console: args.console,
+        reboot_ec: args.reboot_ec,
+        ec_hib_delay: args.ec_hib_delay,
+        sysinfo: args.sysinfo,
+        uptimeinfo: args.uptimeinfo,
+        s0ix_counter: args.s0ix_counter,
+        hello: args.hello,
+        protoinfo: args.protoinfo,
+        switches: args.switches,
+        port80read: args.port80read,
+        panicinfo: args.panicinfo,
+        hash: args.hash.map(|x| x.into_os_string().into_string().unwrap()),
+        driver: args.driver,
+        pd_addrs,
+        pd_ports,
+        test: args.test,
+        test_retimer: args.test_retimer,
+        boardid: args.boardid,
+        dry_run: args.dry_run,
+        force: args.force,
+        // TODO: Set help. Not very important because Clap handles this by itself
+        help: false,
+        // UEFI only for now. Don't need to handle
+        allupdate: false,
+        // UEFI only - every command needs to implement a parameter to enable the pager
+        paginate: false,
+        info: args.info,
+        meinfo: args.meinfo,
+        flash_gpu_descriptor,
+        flash_gpu_descriptor_file: args
+            .flash_gpu_descriptor_file
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        dump_gpu_descriptor_file: args
+            .dump_gpu_descriptor_file
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        validate_gpu_descriptor_file: args
+            .validate_gpu_descriptor_file
+            .map(|x| x.into_os_string().into_string().unwrap()),
+        nvidia: args.nvidia,
+        host_command,
+    }
+}
