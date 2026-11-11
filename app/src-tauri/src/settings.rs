@@ -146,8 +146,10 @@ mod tests {
 
     #[test]
     fn chart_window_snaps_to_offered_spans() {
-        let mut s = Settings::default();
-        s.chart_window_min = 0;
+        let mut s = Settings {
+            chart_window_min: 0,
+            ..Default::default()
+        };
         assert_eq!(s.clone().sanitized().chart_window_min, 1);
         s.chart_window_min = 7;
         assert_eq!(s.clone().sanitized().chart_window_min, 5);
