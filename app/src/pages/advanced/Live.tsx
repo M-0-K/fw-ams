@@ -1,6 +1,7 @@
 import type { HistorySample } from "../../bindings/HistorySample";
 import type { SmuTelemetry } from "../../bindings/SmuTelemetry";
 import type { TunerView } from "../../bindings/TunerView";
+import { CHART_WINDOWS_MIN } from "../../api";
 import LineChart from "../../components/LineChart";
 import PowerBreakdown from "../../components/PowerBreakdown";
 import Stat from "../../components/Stat";
@@ -19,11 +20,50 @@ function limiters(t: SmuTelemetry | null | undefined): string[] {
   return out;
 }
 
-export default function Live({ view, history }: { view: TunerView; history: HistorySample[] }) {
+/** Segmented control for the chart time span */
+function WindowPicker({ value, onChange }: { value: number; onChange: (min: number) => void }) {
+  return (
+    <div className="flex items-center justify-end gap-2 text-xs">
+      <span className="text-slate-500">Zeitraum</span>
+      <div className="inline-flex overflow-hidden rounded-lg border border-slate-300 dark:border-slate-600" role="radiogroup">
+        {CHART_WINDOWS_MIN.map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="radio"
+            aria-checked={value === m}
+            onClick={() => onChange(m)}
+            className={`px-2.5 py-1 font-medium tabular-nums transition focus-visible:outline-2 focus-visible:outline-accent ${
+              value === m
+                ? "bg-accent text-white"
+                : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+            }`}
+          >
+            {m} min
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export default function Live({
+  view,
+  history,
+  windowMin,
+  onWindow,
+}: {
+  view: TunerView;
+  history: HistorySample[];
+  /** Chart time span, minutes */
+  windowMin: number;
+  onWindow: (min: number) => void;
+}) {
   const t = view.state.telemetry;
   const os = view.os;
   const last = history.length ? history[history.length - 1] : null;
   const limits = limiters(t);
+  const windowMs = windowMin * 60_000;
 
   return (
     <div className="space-y-4">
@@ -42,9 +82,11 @@ export default function Live({ view, history }: { view: TunerView; history: Hist
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <section className="card space-y-6">
+          <WindowPicker value={windowMin} onChange={onWindow} />
           <LineChart
             title="Leistungsaufnahme"
             unit="W"
+            windowMs={windowMs}
             samples={history}
             series={[
               { label: "APU jetzt", color: "var(--series-1)", get: (x) => x.apuW },
@@ -60,6 +102,7 @@ export default function Live({ view, history }: { view: TunerView; history: Hist
             title="CPU-Temperatur (Tctl)"
             unit="°C"
             digits={0}
+            windowMs={windowMs}
             samples={history}
             series={[{ label: "Tctl", color: "var(--series-1)", get: (x) => x.tctlC }]}
             refs={[{ label: "Grenze", get: (x) => x.tctlLimit }]}
@@ -68,6 +111,7 @@ export default function Live({ view, history }: { view: TunerView; history: Hist
             title="CPU-Takt"
             unit="MHz"
             digits={0}
+            windowMs={windowMs}
             samples={history}
             series={[
               { label: "Höchster Kern", color: "var(--series-1)", get: (x) => x.maxMhz },

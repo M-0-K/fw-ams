@@ -16,6 +16,8 @@ export type Reference = {
 };
 
 const PAD = { top: 8, right: 12, bottom: 20, left: 40 };
+/** Samples further apart than this (1 Hz sampling) are not connected, e.g. across standby */
+const GAP_MS = 5_000;
 
 function useWidth() {
   const ref = useRef<HTMLDivElement>(null);
@@ -51,9 +53,15 @@ function path(points: ([number, number] | null)[]): string {
   return d;
 }
 
+/** Axis label for the left end, e.g. "−10 min" or "−30 s" */
+function spanLabel(ms: number): string {
+  return ms >= 60_000 ? `−${Math.round(ms / 60_000)} min` : `−${Math.round(ms / 1000)} s`;
+}
+
 /**
- * Time series chart: one y-axis, 2px lines, recessive grid, legend with current values,
- * crosshair + tooltip on hover.
+ * Time series chart over a fixed time window ending now: one y-axis, 2px lines, recessive
+ * grid, legend with current values, crosshair + tooltip on hover. Gaps in the data (standby,
+ * app paused) stay empty instead of being bridged.
  */
 export default function LineChart({
   title,
@@ -64,6 +72,7 @@ export default function LineChart({
   refs = [],
   height = 170,
   yMax,
+  windowMs = 10 * 60_000,
 }: {
   title: string;
   unit: string;
@@ -74,31 +83,46 @@ export default function LineChart({
   height?: number;
   /** Fixed upper bound (e.g. 100 % usage); otherwise derived from the data */
   yMax?: number;
+  /** Shown time span up to now */
+  windowMs?: number;
 }) {
   const [box, width] = useWidth();
   const [hover, setHover] = useState<number | null>(null);
   const plotW = width - PAD.left - PAD.right;
   const plotH = height - PAD.top - PAD.bottom;
 
-  const n = samples.length;
-  const t0 = n ? samples[0].t : 0;
-  const t1 = n ? samples[n - 1].t : 1;
-  const span = Math.max(t1 - t0, 60_000);
-  const values = samples.flatMap((s) => [...series.map((x) => x.get(s)), ...refs.map((r) => r.get(s))]);
+  const span = windowMs;
+  const newest = samples.length ? samples[samples.length - 1].t : 0;
+  const t1 = Math.max(Date.now(), newest);
+  const visible = samples.filter((s) => s.t >= t1 - span);
+  const n = visible.length;
+  const values = visible.flatMap((s) => [...series.map((x) => x.get(s)), ...refs.map((r) => r.get(s))]);
   const top = yMax ?? niceMax(Math.max(1, ...values.filter((v): v is number => v !== null && Number.isFinite(v))) * 1.05);
   const x = (t: number) => PAD.left + ((t - (t1 - span)) / span) * plotW;
   const y = (v: number) => PAD.top + plotH - (Math.min(v, top) / top) * plotH;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * top);
-  const last = n ? samples[n - 1] : null;
-  const shown = hover !== null && samples[hover] ? samples[hover] : null;
+  const last = n ? visible[n - 1] : null;
+  const shown = hover !== null && visible[hover] ? visible[hover] : null;
+
+  /** SVG path of one value, lifting the pen at missing values and time gaps */
+  const line = (get: (s: HistorySample) => number | null) => {
+    const points: ([number, number] | null)[] = [];
+    visible.forEach((s, i) => {
+      if (i > 0 && s.t - visible[i - 1].t > GAP_MS) points.push(null);
+      const v = get(s);
+      points.push(v !== null ? [x(s.t), y(v)] : null);
+    });
+    return path(points);
+  };
 
   const onMove = (e: React.MouseEvent<SVGRectElement>) => {
     if (!n) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const t = t1 - span + ((e.clientX - rect.left) / rect.width) * span;
     let best = 0;
-    for (let i = 1; i < n; i++) if (Math.abs(samples[i].t - t) < Math.abs(samples[best].t - t)) best = i;
-    setHover(best);
+    for (let i = 1; i < n; i++) if (Math.abs(visible[i].t - t) < Math.abs(visible[best].t - t)) best = i;
+    // Nothing to show in a gap
+    setHover(Math.abs(visible[best].t - t) <= GAP_MS ? best : null);
   };
 
   const fmt = (v: number | null) => num(v, digits, unit);
@@ -135,7 +159,7 @@ export default function LineChart({
             </g>
           ))}
           <text x={PAD.left} y={height - 4} className="fill-slate-500 text-[10px]">
-            −{Math.round(span / 60_000)} min
+            {spanLabel(span)}
           </text>
           <text x={width - PAD.right} y={height - 4} textAnchor="end" className="fill-slate-500 text-[10px]">
             jetzt
@@ -143,7 +167,7 @@ export default function LineChart({
           {refs.map((r) => (
             <path
               key={r.label}
-              d={path(samples.map((s) => (r.get(s) !== null ? [x(s.t), y(r.get(s)!)] : null)))}
+              d={line(r.get)}
               fill="none"
               stroke="var(--chart-ref)"
               strokeWidth={1}
@@ -153,7 +177,7 @@ export default function LineChart({
           {series.map((s) => (
             <path
               key={s.label}
-              d={path(samples.map((p) => (s.get(p) !== null ? [x(p.t), y(s.get(p)!)] : null)))}
+              d={line(s.get)}
               fill="none"
               stroke={s.color}
               strokeWidth={2}

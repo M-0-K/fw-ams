@@ -3,7 +3,7 @@ import type { ProfileSlot } from "../bindings/ProfileSlot";
 import type { Snapshot } from "../bindings/Snapshot";
 import type { TunerConfig } from "../bindings/TunerConfig";
 import type { TunerView } from "../bindings/TunerView";
-import { useChargeControl, useSettings, useTuner } from "../api";
+import { setSettings, useChargeControl, useSettings, useTuner } from "../api";
 import Stat from "../components/Stat";
 import { Toast, useFlash } from "../components/ui";
 import BatteryCare from "./advanced/BatteryCare";
@@ -78,7 +78,16 @@ export default function AdvancedPage({ s }: { s: Snapshot }) {
         {busy && <span className="ml-auto text-sm text-slate-500">Bitte warten…</span>}
       </div>
 
-      {tab === "live" && <Live view={view} history={history} />}
+      {tab === "live" && (
+        <Live
+          view={view}
+          history={history}
+          windowMin={settings?.chartWindowMin ?? 10}
+          onWindow={(chartWindowMin) =>
+            settings && setSettings({ ...settings, chartWindowMin }).catch((e) => flash(String(e), true))
+          }
+        />
+      )}
       {(tab === "power" || tab === "voltage") && (
         <Tuning
           tab={tab}

@@ -25,7 +25,7 @@ Lizenz GPL-3.0-or-later. Nutzerdoku: README.md, Entwicklerdoku: docs/development
 | `crates/fw-ams-cli` | CLI zum Debuggen (`status`, `cards`, `usb`, `dump`, `--mock`) |
 | `app/src-tauri/src/main.rs` | Setup, Fenster-Events, Exit (Sparmodus beenden) |
 | `.../state.rs`, `commands.rs`, `poller.rs` | `AppState` (+ Lock-Reihenfolge, `commit_settings`, `Wake`); alle Commands; Poller- und Tuner-Thread |
-| `.../charge.rs`, `tuner.rs`, `saver.rs` | Ladelimit/-strom mit Statusmodell und gemerktem Original; Tuner-Anbindung, Verlauf (10 min); Sparmodus |
+| `.../charge.rs`, `tuner.rs`, `saver.rs` | Ladelimit/-strom mit Statusmodell und gemerktem Original; Tuner-Anbindung, Verlauf (30 min, nach Zeit gekürzt); Sparmodus |
 | `.../reset.rs`, `store.rs` | Zusatzfunktionen aus / Werksreset mit Bericht je Schritt; JSON-Dateien im App-Config-Dir |
 | `.../tray.rs`, `flyout.rs` | Tray-Icon, Hover-Flyout (Breite `WIDTH` hier **und** in `Flyout.tsx`) |
 | `.../settings.rs` | `Settings` (+ `Theme`), JSON in App-Config-Dir, `sanitized()` klemmt Werte |

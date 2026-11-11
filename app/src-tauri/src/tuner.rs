@@ -13,8 +13,10 @@ use std::sync::Mutex;
 use std::time::Instant;
 use ts_rs::TS;
 
-/// 10 minutes at one sample per second
-const HISTORY: usize = 600;
+/// History span: the longest chart window (`Settings::CHART_WINDOWS_MIN`)
+pub const HISTORY_MS: u64 = 30 * 60 * 1000;
+/// Hard cap on the sample count, in case the clock jumps backwards
+const HISTORY_MAX: usize = 2 * 30 * 60;
 
 /// What is needed to enable SMU tuning on this machine
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -41,7 +43,7 @@ pub struct TunerView {
 }
 
 /// One point of the live charts. Powers in W, positive = consumption.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct HistorySample {
@@ -94,7 +96,7 @@ impl Tuner {
         Self {
             backend,
             os: Mutex::new(if mock { None } else { OsCpuMonitor::new() }),
-            history: Mutex::new(VecDeque::with_capacity(HISTORY)),
+            history: Mutex::new(VecDeque::new()),
             latest: Mutex::new(None),
             service_exe,
             module,
@@ -188,13 +190,7 @@ impl Tuner {
             setup: self.setup(),
         };
         let sample = sample(&view, snapshot);
-        {
-            let mut h = self.history.lock().unwrap();
-            if h.len() >= HISTORY {
-                h.pop_front();
-            }
-            h.push_back(sample.clone());
-        }
+        push_history(&mut self.history.lock().unwrap(), sample.clone());
         *self.latest.lock().unwrap() = Some(view.clone());
         (view, sample)
     }
@@ -289,6 +285,16 @@ fn service_request(_req: Request) -> Result<TunerState, String> {
     Err("Nur unter Windows verfügbar".into())
 }
 
+/// Append and drop what is older than [`HISTORY_MS`] (by time, not count: after standby the
+/// old samples must not fill the charts)
+fn push_history(h: &mut VecDeque<HistorySample>, sample: HistorySample) {
+    let oldest = sample.t.saturating_sub(HISTORY_MS);
+    h.push_back(sample);
+    while h.front().is_some_and(|s| s.t < oldest) || h.len() > HISTORY_MAX {
+        h.pop_front();
+    }
+}
+
 fn sample(view: &TunerView, s: Option<&Snapshot>) -> HistorySample {
     let t = view.state.telemetry.as_ref();
     let battery = s.and_then(|s| s.battery.as_ref());
@@ -314,5 +320,36 @@ fn sample(view: &TunerView, s: Option<&Snapshot>) -> HistorySample {
         usage: view.os.usage_percent,
         avg_mhz: (!mhz.is_empty()).then(|| mhz.iter().sum::<f32>() / mhz.len() as f32),
         max_mhz: mhz.iter().copied().reduce(f32::max),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(t: u64) -> HistorySample {
+        HistorySample { t, ..Default::default() }
+    }
+
+    #[test]
+    fn history_is_cut_by_time() {
+        let mut h = VecDeque::new();
+        let start = 1_000_000_000;
+        for i in 0..10 {
+            push_history(&mut h, at(start + i * 1000));
+        }
+        assert_eq!(h.len(), 10);
+        // Standby for two hours: everything from before is older than the span
+        push_history(&mut h, at(start + 2 * 3600 * 1000));
+        assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn history_has_a_count_cap() {
+        let mut h = VecDeque::new();
+        for _ in 0..HISTORY_MAX + 10 {
+            push_history(&mut h, at(5_000_000_000));
+        }
+        assert_eq!(h.len(), HISTORY_MAX);
     }
 }
