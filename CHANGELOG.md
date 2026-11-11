@@ -3,6 +3,12 @@
 Alle nennenswerten Änderungen. Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Behoben
+- Linux ohne root: Framework-Laptops wurden nicht erkannt (Modell, BIOS, EC-Zugriff fehlten), weil
+  die SMBIOS-Tabelle nur für root lesbar ist. Die Angaben kommen jetzt aus `/sys/class/dmi/id` (#3)
+
 ## [0.1.0] – 2026-10-20
 
 Erste öffentliche Version.
