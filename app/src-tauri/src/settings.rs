@@ -65,6 +65,8 @@ pub struct Settings {
     /// When started by autostart, stay in the tray
     pub start_minimized: bool,
     pub theme: Theme,
+    /// Time span of the live charts on the Advanced page, minutes
+    pub chart_window_min: u16,
     pub alerts: AlertSettings,
     pub battery: BatterySettings,
 }
@@ -77,6 +79,7 @@ impl Default for Settings {
             autostart: false,
             start_minimized: true,
             theme: Theme::System,
+            chart_window_min: 10,
             alerts: AlertSettings::default(),
             battery: BatterySettings::default(),
         }
@@ -86,9 +89,17 @@ impl Default for Settings {
 impl Settings {
     pub const MIN_POLL_MS: u32 = 500;
     pub const MAX_POLL_MS: u32 = 60_000;
+    /// Chart spans offered in the UI; the backend keeps history for the longest one
+    pub const CHART_WINDOWS_MIN: [u16; 4] = [1, 5, 10, 30];
 
     pub fn sanitized(mut self) -> Self {
         self.poll_interval_ms = self.poll_interval_ms.clamp(Self::MIN_POLL_MS, Self::MAX_POLL_MS);
+        // Snap to the nearest offered span
+        let w = self.chart_window_min;
+        self.chart_window_min = Self::CHART_WINDOWS_MIN
+            .into_iter()
+            .min_by_key(|c| c.abs_diff(w))
+            .unwrap_or(10);
         self.alerts.battery_low_percent = self.alerts.battery_low_percent.clamp(2, 99);
         // The critical level must stay below the warning level
         self.alerts.battery_critical_percent = self
@@ -131,6 +142,17 @@ mod tests {
         assert_eq!(s.battery.charge_max, 25);
         assert_eq!(s.battery.charge_min, 20);
         assert_eq!(s.battery.charge_rate, 0.0);
+    }
+
+    #[test]
+    fn chart_window_snaps_to_offered_spans() {
+        let mut s = Settings::default();
+        s.chart_window_min = 0;
+        assert_eq!(s.clone().sanitized().chart_window_min, 1);
+        s.chart_window_min = 7;
+        assert_eq!(s.clone().sanitized().chart_window_min, 5);
+        s.chart_window_min = 500;
+        assert_eq!(s.sanitized().chart_window_min, 30);
     }
 
     #[test]

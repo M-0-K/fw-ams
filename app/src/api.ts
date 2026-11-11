@@ -57,8 +57,10 @@ export function useSettings(): Settings | null {
 
 // --- Advanced: CPU tuner, history, charge control -------------------------------------------
 
-/** Same cap as the backend history (10 min at 1 Hz) */
-const HISTORY = 600;
+/** Same span as the backend history (`HISTORY_MS`, the longest chart window) */
+export const HISTORY_MS = 30 * 60_000;
+/** Chart spans offered in the UI, minutes (same as `Settings::CHART_WINDOWS_MIN`) */
+export const CHART_WINDOWS_MIN = [1, 5, 10, 30] as const;
 
 export const tunerSetConfig = (config: TunerConfig) => invoke<TunerState>("tuner_set_config", { config });
 export const tunerReset = () => invoke<TunerState>("tuner_reset");
@@ -80,7 +82,9 @@ export function useTuner(): { view: TunerView | null; history: HistorySample[] }
     const unlisten = listen<{ view: TunerView; sample: HistorySample }>("tuner", (e) => {
       if (!active) return;
       setView(e.payload.view);
-      setHistory((h) => [...h.slice(-(HISTORY - 1)), e.payload.sample]);
+      const sample = e.payload.sample;
+      // Cut by time, not count: after standby the old samples must not fill the charts
+      setHistory((h) => [...h.filter((x) => x.t >= sample.t - HISTORY_MS), sample]);
     });
     return () => {
       active = false;

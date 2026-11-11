@@ -12,4 +12,8 @@ advancedFeatures: boolean, pollIntervalMs: number, autostart: boolean,
 /**
  * When started by autostart, stay in the tray
  */
-startMinimized: boolean, theme: Theme, alerts: AlertSettings, battery: BatterySettings, };
+startMinimized: boolean, theme: Theme, 
+/**
+ * Time span of the live charts on the Advanced page, minutes
+ */
+chartWindowMin: number, alerts: AlertSettings, battery: BatterySettings, };

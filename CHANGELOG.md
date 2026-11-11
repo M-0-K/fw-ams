@@ -3,6 +3,12 @@
 Alle nennenswerten Änderungen. Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Behoben
+- Live-Diagramme zeigen einen festen Zeitraum statt einer festen Anzahl Messpunkte; Lücken
+  (z. B. Ruhezustand) werden nicht mehr überbrückt. Zeitraum wählbar: 1, 5, 10 oder 30 min (#1)
+
 ## [0.1.0] – 2026-10-20
 
 Erste öffentliche Version.
