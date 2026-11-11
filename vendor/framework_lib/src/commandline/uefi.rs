@@ -1,0 +1,962 @@
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
+#[allow(unused_imports)]
+use log::{debug, error, info, trace};
+use uefi::boot;
+use uefi::proto::shell_params::ShellParameters;
+
+use crate::chromium_ec::commands::SetGpuSerialMagic;
+use crate::chromium_ec::{CrosEcDriverType, HardwareDeviceType};
+use crate::commandline::{Cli, LogLevel};
+
+use super::{ConsoleArg, FpBrightnessArg, InputDeckModeArg, RebootEcArg, TabletModeArg};
+
+/// Get commandline arguments from UEFI environment
+pub fn get_args() -> Vec<String> {
+    let shell_params = uefi::boot::open_protocol_exclusive::<ShellParameters>(boot::image_handle());
+    let shell_params = match shell_params {
+        Ok(s) => s,
+        Err(_e) => {
+            error!("Failed to get ShellParameters protocol");
+            // TODO: Return result
+            // return e.status();
+            return vec![];
+        }
+    };
+    let args: Vec<String> = shell_params.args().map(|x| x.to_string()).collect();
+    args
+}
+
+pub fn parse(args: &[String]) -> Cli {
+    let mut cli = Cli {
+        verbosity: LogLevel(log::LevelFilter::Error),
+        paginate: false,
+        versions: false,
+        version: false,
+        features: false,
+        esrt: false,
+        device: None,
+        compare_version: None,
+        power: false,
+        smartbattery: None,
+        smartbattery_auth: false,
+        thermal: false,
+        thermalget: false,
+        thermalset: None,
+        sensors: false,
+        fansetduty: None,
+        fansetrpm: None,
+        autofanctrl: None,
+        pdports: false,
+        pdports_chromebook: false,
+        pd_info: false,
+        pd_reset: None,
+        pd_disable: None,
+        pd_enable: None,
+        dp_hdmi_info: false,
+        dp_hdmi_update: None,
+        audio_card_info: false,
+        privacy: false,
+        pd_bin: None,
+        ec_bin: None,
+        dump_ec_flash: None,
+        flash_full_ec: None,
+        flash_ec: None,
+        flash_ro_ec: None,
+        flash_rw_ec: None,
+        capsule: None,
+        dump: None,
+        h2o_capsule: None,
+        intrusion: false,
+        inputdeck: false,
+        inputdeck_mode: None,
+        expansion_bay: false,
+        charge_limit: None,
+        charge_current_limit: None,
+        charge_rate_limit: None,
+        get_gpio: None,
+        fp_led_level: None,
+        fp_brightness: None,
+        kblight: None,
+        remap_key: None,
+        rgbkbd: vec![],
+        ps2_enable: None,
+        tablet_mode: None,
+        touchscreen_enable: None,
+        haptic_intensity: None,
+        click_force: None,
+        stylus_battery: false,
+        console: None,
+        reboot_ec: None,
+        ec_hib_delay: None,
+        sysinfo: false,
+        uptimeinfo: false,
+        s0ix_counter: false,
+        hello: false,
+        protoinfo: false,
+        switches: false,
+        port80read: false,
+        panicinfo: false,
+        hash: None,
+        // This is the only driver that works on UEFI
+        driver: Some(CrosEcDriverType::Portio),
+        pd_addrs: None,
+        pd_ports: None,
+        test: false,
+        test_retimer: false,
+        boardid: false,
+        dry_run: false,
+        force: false,
+        help: false,
+        flash_gpu_descriptor: None,
+        flash_gpu_descriptor_file: None,
+        dump_gpu_descriptor_file: None,
+        validate_gpu_descriptor_file: None,
+        allupdate: false,
+        info: false,
+        meinfo: None,
+        nvidia: false,
+        host_command: None,
+    };
+
+    if args.len() == 0 {
+        cli.help = true;
+    }
+
+    let mut found_an_option = false;
+
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "-q" {
+            cli.verbosity = LogLevel(log::LevelFilter::Off);
+        } else if arg == "-v" {
+            cli.verbosity = LogLevel(log::LevelFilter::Warn);
+        } else if arg == "-vv" {
+            cli.verbosity = LogLevel(log::LevelFilter::Info);
+        } else if arg == "-vvv" {
+            cli.verbosity = LogLevel(log::LevelFilter::Debug);
+        } else if arg == "-vvvv" {
+            cli.verbosity = LogLevel(log::LevelFilter::Trace);
+        } else if arg == "--versions" {
+            cli.versions = true;
+            found_an_option = true;
+        } else if arg == "--version" {
+            cli.version = true;
+            found_an_option = true;
+        } else if arg == "--features" {
+            cli.features = true;
+            found_an_option = true;
+        } else if arg == "-b" {
+            cli.paginate = true;
+            found_an_option = true;
+        } else if arg == "--esrt" {
+            cli.esrt = true;
+            found_an_option = true;
+        } else if arg == "--power" {
+            cli.power = true;
+            found_an_option = true;
+        } else if arg == "--thermal" {
+            cli.thermal = true;
+            found_an_option = true;
+        } else if arg == "--thermalget" {
+            cli.thermalget = true;
+            found_an_option = true;
+        } else if arg == "--thermalset" {
+            let mut values = Vec::new();
+            for value_arg in &args[i + 1..] {
+                if let Ok(value) = value_arg.parse::<i32>() {
+                    values.push(value);
+                } else {
+                    break;
+                }
+            }
+            cli.thermalset = if (2..=6).contains(&values.len()) {
+                Some(values)
+            } else {
+                println!(
+                    "--thermalset requires 2 to 6 numbers. <SENSOR> <WARN> [<HIGH> [<HALT> [<FAN_OFF> [<FAN_MAX>]]]]"
+                );
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--sensors" {
+            cli.sensors = true;
+            found_an_option = true;
+        } else if arg == "--fansetduty" {
+            cli.fansetduty = if args.len() > i + 2 {
+                let fan_idx = args[i + 1].parse::<u32>();
+                let duty = args[i + 2].parse::<u32>();
+                if let (Ok(fan_idx), Ok(duty)) = (fan_idx, duty) {
+                    Some((Some(fan_idx), duty))
+                } else {
+                    println!(
+                        "Invalid values for --fansetduty: '{} {}'. Must be u32 integers.",
+                        args[i + 1],
+                        args[i + 2]
+                    );
+                    None
+                }
+            } else if args.len() > i + 1 {
+                if let Ok(duty) = args[i + 1].parse::<u32>() {
+                    Some((None, duty))
+                } else {
+                    println!(
+                        "Invalid values for --fansetduty: '{}'. Must be 0-100.",
+                        args[i + 1],
+                    );
+                    None
+                }
+            } else {
+                println!("--fansetduty requires one or two. [fan id] [duty] or [duty]");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--fansetrpm" {
+            cli.fansetrpm = if args.len() > i + 2 {
+                let fan_idx = args[i + 1].parse::<u32>();
+                let rpm = args[i + 2].parse::<u32>();
+                if let (Ok(fan_idx), Ok(rpm)) = (fan_idx, rpm) {
+                    Some((Some(fan_idx), rpm))
+                } else {
+                    println!(
+                        "Invalid values for --fansetrpm: '{} {}'. Must be u32 integers.",
+                        args[i + 1],
+                        args[i + 2]
+                    );
+                    None
+                }
+            } else if args.len() > i + 1 {
+                if let Ok(rpm) = args[i + 1].parse::<u32>() {
+                    Some((None, rpm))
+                } else {
+                    println!(
+                        "Invalid values for --fansetrpm: '{}'. Must be an integer.",
+                        args[i + 1],
+                    );
+                    None
+                }
+            } else {
+                println!("--fansetrpm requires one or two. [fan id] [rpm] or [rpm]");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--autofanctrl" {
+            cli.autofanctrl = if args.len() > i + 1 {
+                if let Ok(fan_id) = args[i + 1].parse::<u8>() {
+                    Some(Some(fan_id))
+                } else {
+                    println!(
+                        "Invalid value for --autofanctrl: '{}'. Must be integer < 256.",
+                        args[i + 1]
+                    );
+                    None
+                }
+            } else {
+                Some(None)
+            };
+            found_an_option = true;
+        } else if arg == "--pdports" {
+            cli.pdports = true;
+            found_an_option = true;
+        } else if arg == "--pdports-chromebook" {
+            cli.pdports_chromebook = true;
+            found_an_option = true;
+        } else if arg == "--allupdate" {
+            cli.allupdate = true;
+            found_an_option = true;
+        } else if arg == "--info" {
+            cli.info = true;
+            found_an_option = true;
+        } else if arg == "--meinfo" {
+            cli.meinfo = if args.len() > i + 1 {
+                Some(Some(args[i + 1].clone()))
+            } else {
+                Some(None)
+            };
+            found_an_option = true;
+        } else if arg == "--intrusion" {
+            cli.intrusion = true;
+            found_an_option = true;
+        } else if arg == "--inputdeck" {
+            cli.inputdeck = true;
+            found_an_option = true;
+        } else if arg == "--inputdeck-mode" {
+            cli.inputdeck_mode = if args.len() > i + 1 {
+                let inputdeck_mode = &args[i + 1];
+                if inputdeck_mode == "auto" {
+                    Some(InputDeckModeArg::Auto)
+                } else if inputdeck_mode == "off" {
+                    Some(InputDeckModeArg::Off)
+                } else if inputdeck_mode == "on" {
+                    Some(InputDeckModeArg::On)
+                } else if inputdeck_mode == "reset" {
+                    Some(InputDeckModeArg::Reset)
+                } else {
+                    println!("Invalid value for --inputdeck-mode: {}", inputdeck_mode);
+                    None
+                }
+            } else {
+                println!(
+                    "Need to provide a value for --inputdeck-mode. Either `auto`, `off`, `on`, or `reset`"
+                );
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--expansion-bay" {
+            cli.expansion_bay = true;
+            found_an_option = true;
+        } else if arg == "--nvidia" {
+            cli.nvidia = true;
+            found_an_option = true;
+        } else if arg == "--charge-limit" {
+            cli.charge_limit = if args.len() > i + 1 {
+                if let Ok(percent) = args[i + 1].parse::<u8>() {
+                    Some(Some(percent))
+                } else {
+                    println!(
+                        "Invalid value for --charge-limit: '{}'. Must be integer < 100.",
+                        args[i + 1]
+                    );
+                    None
+                }
+            } else {
+                Some(None)
+            };
+            found_an_option = true;
+        } else if arg == "--charge-current-limit" {
+            cli.charge_current_limit = if args.len() > i + 2 {
+                let limit = args[i + 1].parse::<u32>();
+                let soc = args[i + 2].parse::<u32>();
+                if let (Ok(limit), Ok(soc)) = (limit, soc) {
+                    Some((limit, Some(soc)))
+                } else {
+                    println!(
+                        "Invalid values for --charge-current-limit: '{} {}'. Must be u32 integers.",
+                        args[i + 1],
+                        args[i + 2]
+                    );
+                    None
+                }
+            } else if args.len() > i + 1 {
+                if let Ok(limit) = args[i + 1].parse::<u32>() {
+                    Some((limit, None))
+                } else {
+                    println!(
+                        "Invalid values for --charge-current-limit: '{}'. Must be an integer.",
+                        args[i + 1],
+                    );
+                    None
+                }
+            } else {
+                println!("--charge-current-limit requires one or two. [limit] [soc] or [limit]");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--charge-rate-limit" {
+            cli.charge_rate_limit = if args.len() > i + 2 {
+                let limit = args[i + 1].parse::<f32>();
+                let soc = args[i + 2].parse::<f32>();
+                if let (Ok(limit), Ok(soc)) = (limit, soc) {
+                    Some((limit, Some(soc)))
+                } else {
+                    println!(
+                        "Invalid values for --charge-rate-limit: '{} {}'. Must be u32 integers.",
+                        args[i + 1],
+                        args[i + 2]
+                    );
+                    None
+                }
+            } else if args.len() > i + 1 {
+                if let Ok(limit) = args[i + 1].parse::<f32>() {
+                    Some((limit, None))
+                } else {
+                    println!(
+                        "Invalid values for --charge-rate-limit: '{}'. Must be an integer.",
+                        args[i + 1],
+                    );
+                    None
+                }
+            } else {
+                println!("--charge-rate-limit requires one or two. [limit] [soc] or [limit]");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--get-gpio" {
+            cli.get_gpio = if args.len() > i + 1 {
+                Some(Some(args[i + 1].clone()))
+            } else {
+                Some(None)
+            };
+            found_an_option = true;
+        } else if arg == "--kblight" {
+            cli.kblight = if args.len() > i + 1 {
+                if let Ok(percent) = args[i + 1].parse::<u8>() {
+                    Some(Some(percent))
+                } else {
+                    println!(
+                        "Invalid value for --kblight: '{}'. Must be integer < 100.",
+                        args[i + 1]
+                    );
+                    None
+                }
+            } else {
+                Some(None)
+            };
+            found_an_option = true;
+        } else if arg == "--remap-key" {
+            if args.len() > i + 3 {
+                let row = parse_hex_or_dec_u8(&args[i + 1]);
+                let col = parse_hex_or_dec_u8(&args[i + 2]);
+                let scancode = parse_hex_or_dec_u16(&args[i + 3]);
+                if let (Some(row), Some(col), Some(scancode)) = (row, col, scancode) {
+                    cli.remap_key = Some((row, col, scancode));
+                } else {
+                    println!("Invalid values for --remap-key. Must be: <ROW> <COL> <SCANCODE>");
+                }
+            } else {
+                println!("--remap-key requires 3 arguments: <ROW> <COL> <SCANCODE>");
+            }
+            found_an_option = true;
+        } else if arg == "--rgbkbd" {
+            cli.rgbkbd = if args.len() > i + 2 {
+                let mut colors = Vec::<u64>::new();
+                for color_i in i + 1..args.len() {
+                    // TODO: Fail parsing instead of unwrap()
+                    colors.push(args[color_i].parse::<u64>().unwrap());
+                }
+                colors
+            } else {
+                println!("--rgbkbd requires at least 2 arguments, the start key and an RGB value");
+                vec![]
+            };
+            found_an_option = true;
+        } else if arg == "--ps2-enable" {
+            cli.ps2_enable = if args.len() > i + 1 {
+                let enable_arg = &args[i + 1];
+                if enable_arg == "true" {
+                    Some(true)
+                } else if enable_arg == "false" {
+                    Some(false)
+                } else {
+                    println!(
+                        "Need to provide a value for --ps2-enable: '{}'. {}",
+                        args[i + 1],
+                        "Must be `true` or `false`",
+                    );
+                    None
+                }
+            } else {
+                println!("Need to provide a value for --ps2-enable. Must be `true` or `false`");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--tablet-mode" {
+            cli.tablet_mode = if args.len() > i + 1 {
+                let tablet_mode_arg = &args[i + 1];
+                if tablet_mode_arg == "auto" {
+                    Some(TabletModeArg::Auto)
+                } else if tablet_mode_arg == "tablet" {
+                    Some(TabletModeArg::Tablet)
+                } else if tablet_mode_arg == "laptop" {
+                    Some(TabletModeArg::Laptop)
+                } else {
+                    println!(
+                        "Need to provide a value for --tablet-mode: '{}'. {}",
+                        args[i + 1],
+                        "Must be one of: `auto`, `tablet` or `laptop`",
+                    );
+                    None
+                }
+            } else {
+                println!("Need to provide a value for --tablet-mode. One of: `auto`, `tablet` or `laptop`");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--fp-led-level" {
+            cli.fp_led_level = if args.len() > i + 1 {
+                let fp_led_level_arg = &args[i + 1];
+                if fp_led_level_arg == "high" {
+                    Some(Some(FpBrightnessArg::High))
+                } else if fp_led_level_arg == "medium" {
+                    Some(Some(FpBrightnessArg::Medium))
+                } else if fp_led_level_arg == "low" {
+                    Some(Some(FpBrightnessArg::Low))
+                } else if fp_led_level_arg == "ultra-low" {
+                    Some(Some(FpBrightnessArg::UltraLow))
+                } else if fp_led_level_arg == "auto" {
+                    Some(Some(FpBrightnessArg::Auto))
+                } else {
+                    println!("Invalid value for --fp-led-level: {}", fp_led_level_arg);
+                    None
+                }
+            } else {
+                Some(None)
+            };
+            found_an_option = true;
+        } else if arg == "--fp-brightness" {
+            cli.fp_brightness = if args.len() > i + 1 {
+                if let Ok(fp_brightness_arg) = args[i + 1].parse::<u8>() {
+                    if fp_brightness_arg == 0 || fp_brightness_arg > 100 {
+                        println!(
+                            "Invalid value for --fp-brightness: {}. Must be in the range of 1-100",
+                            fp_brightness_arg
+                        );
+                        None
+                    } else {
+                        Some(Some(fp_brightness_arg))
+                    }
+                } else {
+                    println!("Invalid value for --fp-brightness. Must be in the range of 1-100");
+                    None
+                }
+            } else {
+                Some(None)
+            };
+            found_an_option = true;
+        } else if arg == "--console" {
+            cli.console = if args.len() > i + 1 {
+                let console_arg = &args[i + 1];
+                if console_arg == "recent" {
+                    Some(ConsoleArg::Recent)
+                } else if console_arg == "follow" {
+                    Some(ConsoleArg::Follow)
+                } else {
+                    println!("Invalid value for --console: {}", console_arg);
+                    None
+                }
+            } else {
+                println!("Need to provide a value for --console. Either `follow` or `recent`");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--reboot-ec" {
+            cli.reboot_ec = if args.len() > i + 1 {
+                let reboot_ec_arg = &args[i + 1];
+                if reboot_ec_arg == "reboot" {
+                    Some(RebootEcArg::Reboot)
+                } else if reboot_ec_arg == "jump-ro" {
+                    Some(RebootEcArg::JumpRo)
+                } else if reboot_ec_arg == "jump-rw" {
+                    Some(RebootEcArg::JumpRw)
+                } else if reboot_ec_arg == "cancel-jump" {
+                    Some(RebootEcArg::CancelJump)
+                } else if reboot_ec_arg == "disable-jump" {
+                    Some(RebootEcArg::DisableJump)
+                } else {
+                    println!("Invalid value for --reboot-ec: {}", reboot_ec_arg);
+                    None
+                }
+            } else {
+                println!("Need to provide a value for --reboot-ec. Either `reboot`, `jump-ro`, `jump-rw`, `cancel-jump` or `disable-jump`");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--ec-hib-delay" {
+            cli.ec_hib_delay = if args.len() > i + 1 {
+                if let Ok(delay) = args[i + 1].parse::<u32>() {
+                    if delay == 0 {
+                        println!("Invalid value for --ec-hib-delay: {}. Must be >0", delay);
+                        None
+                    } else {
+                        Some(Some(delay))
+                    }
+                } else {
+                    println!("Invalid value for --ec-hib-delay. Must be amount in seconds >0");
+                    None
+                }
+            } else {
+                Some(None)
+            };
+            found_an_option = true;
+        } else if arg == "--sysinfo" {
+            cli.sysinfo = true;
+            found_an_option = true;
+        } else if arg == "--uptimeinfo" {
+            cli.uptimeinfo = true;
+            found_an_option = true;
+        } else if arg == "--s0ix-counter" {
+            cli.s0ix_counter = true;
+            found_an_option = true;
+        } else if arg == "--hello" {
+            cli.hello = true;
+            found_an_option = true;
+        } else if arg == "--protoinfo" {
+            cli.protoinfo = true;
+            found_an_option = true;
+        } else if arg == "--switches" {
+            cli.switches = true;
+            found_an_option = true;
+        } else if arg == "--port80read" {
+            cli.port80read = true;
+            found_an_option = true;
+        } else if arg == "--panicinfo" {
+            cli.panicinfo = true;
+            found_an_option = true;
+        } else if arg == "-t" || arg == "--test" {
+            cli.test = true;
+            found_an_option = true;
+        } else if arg == "--test-retimer" {
+            cli.test_retimer = true;
+            found_an_option = true;
+        } else if arg == "--boardid" {
+            cli.boardid = true;
+            found_an_option = true;
+        } else if arg == "-f" || arg == "--force" {
+            cli.force = true;
+            found_an_option = true;
+        } else if arg == "--dry-run" {
+            cli.dry_run = true;
+            found_an_option = true;
+        } else if arg == "-h" || arg == "--help" {
+            cli.help = true;
+            found_an_option = true;
+        } else if arg == "--pd-info" {
+            cli.pd_info = true;
+            found_an_option = true;
+        } else if arg == "--pd-reset" {
+            cli.pd_reset = if args.len() > i + 1 {
+                if let Ok(pd) = args[i + 1].parse::<u8>() {
+                    Some(pd)
+                } else {
+                    println!(
+                        "Invalid value for --pd-reset: '{}'. Must be 0 or 1.",
+                        args[i + 1],
+                    );
+                    None
+                }
+            } else {
+                println!("--pd-reset requires specifying the PD controller");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--pd-disable" {
+            cli.pd_disable = if args.len() > i + 1 {
+                if let Ok(pd) = args[i + 1].parse::<u8>() {
+                    Some(pd)
+                } else {
+                    println!(
+                        "Invalid value for --pd-disable: '{}'. Must be 0 or 1.",
+                        args[i + 1],
+                    );
+                    None
+                }
+            } else {
+                println!("--pd-disable requires specifying the PD controller");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--pd-enable" {
+            cli.pd_enable = if args.len() > i + 1 {
+                if let Ok(pd) = args[i + 1].parse::<u8>() {
+                    Some(pd)
+                } else {
+                    println!(
+                        "Invalid value for --pd-enable: '{}'. Must be 0 or 1.",
+                        args[i + 1],
+                    );
+                    None
+                }
+            } else {
+                println!("--pd-enable requires specifying the PD controller");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--privacy" {
+            cli.privacy = true;
+            found_an_option = true;
+        } else if arg == "--pd-bin" {
+            cli.pd_bin = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--pd-bin requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--ec-bin" {
+            cli.ec_bin = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--ec-bin requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--capsule" {
+            cli.capsule = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--capsule requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--dump" {
+            cli.dump = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--dump requires extra argument to denote output file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--h2o-capsule" {
+            cli.h2o_capsule = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--h2o-capsule requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--dump-ec-flash" {
+            cli.dump_ec_flash = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--dump-ec-flash requires extra argument to denote output file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--flash-full-ec" {
+            cli.flash_full_ec = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--flash-full-ec requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--flash-ec" {
+            cli.flash_ec = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--flash-ec requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--flash-ro-ec" {
+            cli.flash_ro_ec = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--flash-ro-ec requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--flash-rw-ec" {
+            cli.flash_rw_ec = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--flash-rw-ec requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--hash" {
+            cli.hash = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--hash requires extra argument to denote input file");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--pd-addrs" {
+            cli.pd_addrs = if args.len() > i + 3 {
+                let left = args[i + 1].parse::<u16>();
+                let right = args[i + 2].parse::<u16>();
+                let back = args[i + 3].parse::<u16>();
+                if left.is_ok() && right.is_ok() && back.is_ok() {
+                    Some((left.unwrap(), right.unwrap(), back.unwrap()))
+                } else {
+                    println!(
+                        "Invalid values for --pd-addrs: '{} {} {}'. Must be u16 integers.",
+                        args[i + 1],
+                        args[i + 2],
+                        args[i + 3]
+                    );
+                    None
+                }
+            } else {
+                println!("--pd-addrs requires three arguments, one for each address");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--pd-ports" {
+            cli.pd_ports = if args.len() > i + 3 {
+                let left = args[i + 1].parse::<u8>();
+                let right = args[i + 2].parse::<u8>();
+                let back = args[i + 3].parse::<u8>();
+                if left.is_ok() && right.is_ok() && back.is_ok() {
+                    Some((left.unwrap(), right.unwrap(), back.unwrap()))
+                } else {
+                    println!(
+                        "Invalid values for --pd-ports: '{} {} {}'. Must be u16 integers.",
+                        args[i + 1],
+                        args[i + 2],
+                        args[i + 3]
+                    );
+                    None
+                }
+            } else {
+                println!("--pd-ports requires three arguments, one for each port");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--host-command" {
+            cli.host_command = if args.len() > i + 2 {
+                let cmd_id = parse_hex_or_dec_u16(&args[i + 1]);
+                let version = parse_hex_or_dec_u8(&args[i + 2]);
+                if let (Some(cmd_id), Some(version)) = (cmd_id, version) {
+                    let mut data = Vec::new();
+                    let mut parse_error = false;
+                    for j in (i + 3)..args.len() {
+                        if args[j].starts_with('-') {
+                            break;
+                        }
+                        if let Some(byte) = parse_hex_or_dec_u8(&args[j]) {
+                            data.push(byte);
+                        } else {
+                            println!("Invalid data byte for --host-command: '{}'", args[j]);
+                            parse_error = true;
+                            break;
+                        }
+                    }
+                    if parse_error {
+                        None
+                    } else {
+                        Some((cmd_id, version, data))
+                    }
+                } else {
+                    println!("Invalid values for --host-command. Usage: --host-command <CMD_ID> <VERSION> [DATA...]");
+                    None
+                }
+            } else {
+                println!("--host-command requires at least two arguments: <CMD_ID> <VERSION>");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--compare-version" {
+            cli.compare_version = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("--compare-version requires extra argument to denote version");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--device" {
+            cli.device = if args.len() > i + 1 {
+                let console_arg = &args[i + 1];
+                if console_arg == "bios" {
+                    Some(HardwareDeviceType::BIOS)
+                } else if console_arg == "ec" {
+                    Some(HardwareDeviceType::EC)
+                } else if console_arg == "pd0" {
+                    Some(HardwareDeviceType::PD0)
+                } else if console_arg == "pd1" {
+                    Some(HardwareDeviceType::PD1)
+                } else if console_arg == "rtm01" {
+                    Some(HardwareDeviceType::RTM01)
+                } else if console_arg == "rtm23" {
+                    Some(HardwareDeviceType::RTM23)
+                } else if console_arg == "ac-left" {
+                    Some(HardwareDeviceType::AcLeft)
+                } else if console_arg == "ac-right" {
+                    Some(HardwareDeviceType::AcRight)
+                } else {
+                    println!("Invalid value for --device: {}", console_arg);
+                    None
+                }
+            } else {
+                println!("Need to provide a value for --device. Possible values: bios, ec, pd0, pd1, rtm01, rtm23, ac-left, ac-right");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--flash-gpu-descriptor" {
+            cli.flash_gpu_descriptor = if args.len() > i + 2 {
+                let sn = args[i + 2].to_string();
+                let magic = &args[i + 1];
+
+                let hex_magic = if let Some(hex_magic) = magic.strip_prefix("0x") {
+                    u8::from_str_radix(hex_magic, 16)
+                } else {
+                    // Force parse error
+                    u8::from_str_radix("", 16)
+                };
+
+                if let Ok(magic) = magic.parse::<u8>() {
+                    Some((magic, sn))
+                } else if let Ok(hex_magic) = hex_magic {
+                    Some((hex_magic, sn))
+                } else if magic.to_uppercase() == "GPU" {
+                    Some((SetGpuSerialMagic::WriteGPUConfig as u8, sn))
+                } else if magic.to_uppercase() == "SSD" {
+                    Some((SetGpuSerialMagic::WriteSSDConfig as u8, sn))
+                } else {
+                    println!(
+                        "Invalid values for --flash_gpu_descriptor: '{} {}'. Must be u8, 18 character string.",
+                        args[i + 1],
+                        args[i + 2]
+                    );
+                    None
+                }
+            } else {
+                println!("Need to provide a value for --flash_gpu_descriptor. TYPE_MAGIC SERIAL");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--flash-gpu-descriptor-file" {
+            cli.flash_gpu_descriptor_file = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("Need to provide a value for --flash_gpu_descriptor_file. PATH");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--dump-gpu-descriptor-file" {
+            cli.dump_gpu_descriptor_file = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("Need to provide a value for --dump-gpu-descriptor-file. PATH");
+                None
+            };
+            found_an_option = true;
+        } else if arg == "--validate-gpu-descriptor-file" {
+            cli.validate_gpu_descriptor_file = if args.len() > i + 1 {
+                Some(args[i + 1].clone())
+            } else {
+                println!("Need to provide a value for --validate-gpu-descriptor-file. PATH");
+                None
+            };
+            found_an_option = true;
+        }
+    }
+
+    let custom_platform = cli.pd_addrs.is_some() && cli.pd_ports.is_some();
+    let no_customization = cli.pd_addrs.is_none() && cli.pd_ports.is_none();
+    if !(custom_platform || no_customization) {
+        println!("To customize the platform you need to provide all of --pd-addrs, and --pd-ports");
+    }
+
+    if args.len() == 1 && cli.paginate {
+        cli.help = true;
+        found_an_option = true;
+    }
+
+    if !found_an_option {
+        println!(
+            "Failed to parse any commandline options. Commandline was: {:?}",
+            args
+        );
+    }
+
+    cli
+}
+
+fn parse_hex_or_dec_u16(s: &str) -> Option<u16> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u16>().ok()
+    }
+}
+
+fn parse_hex_or_dec_u8(s: &str) -> Option<u8> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u8::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u8>().ok()
+    }
+}

@@ -1,0 +1,2852 @@
+//! Module to build a portable commandline tool
+//!
+//! Can be easily re-used from any OS or UEFI shell.
+//! We have implemented both in the `framework_tool` and `framework_uefi` crates.
+
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use guid_create::{CGuid, GUID};
+use log::Level;
+use num_traits::FromPrimitive;
+
+#[cfg(not(feature = "uefi"))]
+pub mod clap_std;
+#[cfg(feature = "uefi")]
+pub mod uefi;
+
+#[cfg(not(feature = "uefi"))]
+use std::fs;
+#[cfg(not(feature = "uefi"))]
+use std::io::prelude::*;
+
+#[cfg(feature = "rusb")]
+use crate::audio_card::check_synaptics_fw_version;
+use crate::built_info;
+#[cfg(feature = "rusb")]
+use crate::camera::check_camera_version;
+use crate::capsule;
+use crate::capsule_content::{
+    find_bios_version, find_ec_in_bios_cap, find_pd_in_bios_cap, find_retimer_version,
+};
+use crate::ccgx::device::{FwMode, PdController, PdPort};
+#[cfg(feature = "hidapi")]
+use crate::ccgx::hid::{check_ccg_fw_version, find_devices, DP_CARD_PID, HDMI_CARD_PID};
+use crate::ccgx::{self, MainPdVersions, PdVersions, SiliconFamily::*};
+use crate::chromium_ec;
+use crate::chromium_ec::commands::BoardIdType;
+use crate::chromium_ec::commands::DeckStateMode;
+use crate::chromium_ec::commands::FpLedBrightnessLevel;
+use crate::chromium_ec::commands::RebootEcCmd;
+use crate::chromium_ec::commands::RgbS;
+use crate::chromium_ec::commands::TabletModeOverride;
+use crate::chromium_ec::commands::EC_PROTOCOL_INFO_IN_PROGRESS_SUPPORTED;
+use crate::chromium_ec::commands::{PORT_80_EVENT_RESET, PORT_80_EVENT_RESUME};
+use crate::chromium_ec::EcResponseStatus;
+use crate::chromium_ec::Port80History;
+use crate::chromium_ec::{print_err, EcFlashType};
+use crate::chromium_ec::{CrosEcDriver, EcError, EcResult};
+use crate::csme;
+use crate::ec_binary;
+use crate::esrt::{self, ResourceType};
+#[cfg(feature = "uefi")]
+use crate::fw_uefi::enable_page_break;
+#[cfg(feature = "rusb")]
+use crate::inputmodule::check_inputmodule_version;
+#[cfg(all(target_os = "linux", not(feature = "smartmontools")))]
+use crate::nvme;
+use crate::os_specific;
+use crate::parade_retimer;
+use crate::power;
+#[cfg(not(feature = "uefi"))]
+use crate::smart_battery::SmartBattery;
+use crate::smbios;
+use crate::smbios::ConfigDigit0;
+use crate::smbios::{get_smbios, is_framework};
+#[cfg(feature = "hidapi")]
+use crate::touchpad::print_touchpad_fw_ver;
+#[cfg(feature = "hidapi")]
+use crate::touchscreen;
+#[cfg(feature = "rusb")]
+use crate::usbhub::check_usbhub_version;
+use crate::util::{self, Config, Platform, PlatformFamily};
+use dmidecode::Structure;
+#[cfg(feature = "hidapi")]
+use hidapi::HidApi;
+use sha2::{Digest, Sha256, Sha384, Sha512};
+
+#[cfg(feature = "nvidia")]
+use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
+
+use crate::chromium_ec::{CrosEc, CrosEcDriverType, HardwareDeviceType};
+
+#[cfg(feature = "uefi")]
+use core::prelude::rust_2021::derive;
+
+#[cfg_attr(not(feature = "uefi"), derive(clap::ValueEnum))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum TabletModeArg {
+    Auto,
+    Tablet,
+    Laptop,
+}
+
+#[cfg_attr(not(feature = "uefi"), derive(clap::ValueEnum))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConsoleArg {
+    Recent,
+    Follow,
+}
+
+#[cfg_attr(not(feature = "uefi"), derive(clap::ValueEnum))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum RebootEcArg {
+    Reboot,
+    JumpRo,
+    JumpRw,
+    CancelJump,
+    DisableJump,
+}
+
+#[cfg_attr(not(feature = "uefi"), derive(clap::ValueEnum))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FpBrightnessArg {
+    High,
+    Medium,
+    Low,
+    UltraLow,
+    Auto,
+}
+impl From<FpBrightnessArg> for FpLedBrightnessLevel {
+    fn from(w: FpBrightnessArg) -> FpLedBrightnessLevel {
+        match w {
+            FpBrightnessArg::High => FpLedBrightnessLevel::High,
+            FpBrightnessArg::Medium => FpLedBrightnessLevel::Medium,
+            FpBrightnessArg::Low => FpLedBrightnessLevel::Low,
+            FpBrightnessArg::UltraLow => FpLedBrightnessLevel::UltraLow,
+            FpBrightnessArg::Auto => FpLedBrightnessLevel::Auto,
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "uefi"), derive(clap::ValueEnum))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClickForceArg {
+    Low,
+    Medium,
+    High,
+}
+#[cfg(feature = "hidapi")]
+impl From<ClickForceArg> for crate::touchpad::ClickForce {
+    fn from(w: ClickForceArg) -> crate::touchpad::ClickForce {
+        match w {
+            ClickForceArg::Low => crate::touchpad::ClickForce::Low,
+            ClickForceArg::Medium => crate::touchpad::ClickForce::Medium,
+            ClickForceArg::High => crate::touchpad::ClickForce::High,
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "uefi"), derive(clap::ValueEnum))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InputDeckModeArg {
+    Auto,
+    Off,
+    On,
+    Reset,
+}
+impl From<InputDeckModeArg> for DeckStateMode {
+    fn from(w: InputDeckModeArg) -> DeckStateMode {
+        match w {
+            InputDeckModeArg::Auto => DeckStateMode::Required,
+            InputDeckModeArg::Off => DeckStateMode::ForceOff,
+            InputDeckModeArg::On => DeckStateMode::ForceOn,
+            // Actually should turn off first
+            InputDeckModeArg::Reset => DeckStateMode::Required,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LogLevel(log::LevelFilter);
+
+impl Default for LogLevel {
+    fn default() -> Self {
+        LogLevel(log::LevelFilter::Error)
+    }
+}
+
+/// Shadows `clap_std::ClapCli` with extras for UEFI
+///
+/// The UEFI commandline currently doesn't use clap, so we need to shadow the struct.
+/// Also it has extra options.
+#[derive(Debug, Default)]
+pub struct Cli {
+    pub verbosity: LogLevel,
+    pub versions: bool,
+    pub version: bool,
+    pub features: bool,
+    pub esrt: bool,
+    pub device: Option<HardwareDeviceType>,
+    pub compare_version: Option<String>,
+    pub power: bool,
+    pub smartbattery: Option<Option<String>>,
+    pub smartbattery_auth: bool,
+    pub thermal: bool,
+    pub thermalget: bool,
+    pub thermalset: Option<Vec<i32>>,
+    pub sensors: bool,
+    pub fansetduty: Option<(Option<u32>, u32)>,
+    pub fansetrpm: Option<(Option<u32>, u32)>,
+    pub autofanctrl: Option<Option<u8>>,
+    pub pdports: bool,
+    pub pdports_chromebook: bool,
+    pub privacy: bool,
+    pub pd_info: bool,
+    pub pd_reset: Option<u8>,
+    pub pd_disable: Option<u8>,
+    pub pd_enable: Option<u8>,
+    pub dp_hdmi_info: bool,
+    pub dp_hdmi_update: Option<String>,
+    pub audio_card_info: bool,
+    pub pd_bin: Option<String>,
+    pub ec_bin: Option<String>,
+    pub capsule: Option<String>,
+    pub dump: Option<String>,
+    pub h2o_capsule: Option<String>,
+    pub dump_ec_flash: Option<String>,
+    pub flash_full_ec: Option<String>,
+    pub flash_ec: Option<String>,
+    pub flash_ro_ec: Option<String>,
+    pub flash_rw_ec: Option<String>,
+    pub driver: Option<CrosEcDriverType>,
+    pub test: bool,
+    pub test_retimer: bool,
+    pub boardid: bool,
+    pub dry_run: bool,
+    pub force: bool,
+    pub intrusion: bool,
+    pub inputdeck: bool,
+    pub inputdeck_mode: Option<InputDeckModeArg>,
+    pub expansion_bay: bool,
+    pub charge_limit: Option<Option<u8>>,
+    pub charge_current_limit: Option<(u32, Option<u32>)>,
+    pub charge_rate_limit: Option<(f32, Option<f32>)>,
+    pub get_gpio: Option<Option<String>>,
+    pub fp_led_level: Option<Option<FpBrightnessArg>>,
+    pub fp_brightness: Option<Option<u8>>,
+    pub kblight: Option<Option<u8>>,
+    pub remap_key: Option<(u8, u8, u16)>,
+    pub rgbkbd: Vec<u64>,
+    pub ps2_enable: Option<bool>,
+    pub tablet_mode: Option<TabletModeArg>,
+    pub touchscreen_enable: Option<bool>,
+    pub haptic_intensity: Option<u8>,
+    pub click_force: Option<ClickForceArg>,
+    pub stylus_battery: bool,
+    pub console: Option<ConsoleArg>,
+    pub reboot_ec: Option<RebootEcArg>,
+    pub ec_hib_delay: Option<Option<u32>>,
+    pub sysinfo: bool,
+    pub uptimeinfo: bool,
+    pub s0ix_counter: bool,
+    pub hello: bool,
+    pub protoinfo: bool,
+    pub switches: bool,
+    pub port80read: bool,
+    pub panicinfo: bool,
+    pub hash: Option<String>,
+    pub pd_addrs: Option<(u16, u16, u16)>,
+    pub pd_ports: Option<(u8, u8, u8)>,
+    pub help: bool,
+    pub info: bool,
+    pub meinfo: Option<Option<String>>,
+    pub flash_gpu_descriptor: Option<(u8, String)>,
+    pub flash_gpu_descriptor_file: Option<String>,
+    pub dump_gpu_descriptor_file: Option<String>,
+    pub validate_gpu_descriptor_file: Option<String>,
+    pub nvidia: bool,
+    // UEFI only
+    pub allupdate: bool,
+    pub paginate: bool,
+    pub host_command: Option<(u16, u8, Vec<u8>)>,
+}
+
+pub fn parse(args: &[String]) -> Cli {
+    #[cfg(feature = "uefi")]
+    let cli = uefi::parse(args);
+    #[cfg(not(feature = "uefi"))]
+    let cli = clap_std::parse(args);
+
+    if cfg!(feature = "readonly") {
+        // Initialize a new Cli with no arguments
+        // Set all arguments that are readonly/safe
+        // We explicitly only cope the safe ones so that if we add new arguments in the future,
+        // which might be unsafe, we can't forget to exclude them from the safe set.
+        // TODO: Instead of silently ignoring blocked command, we should remind the user
+        Cli {
+            verbosity: cli.verbosity,
+            versions: cli.versions,
+            version: cli.version,
+            features: cli.features,
+            esrt: cli.esrt,
+            device: cli.device,
+            compare_version: cli.compare_version,
+            power: cli.power,
+            thermal: cli.thermal,
+            thermalget: cli.thermalget,
+            thermalset: cli.thermalset,
+            sensors: cli.sensors,
+            // fansetduty
+            // fansetrpm
+            // autofanctrl
+            pdports: cli.pdports,
+            pdports_chromebook: cli.pdports_chromebook,
+            privacy: cli.privacy,
+            pd_info: cli.version,
+            // pd_reset
+            // pd_disable
+            // pd_enable
+            dp_hdmi_info: cli.dp_hdmi_info,
+            // dp_hdmi_update
+            audio_card_info: cli.audio_card_info,
+            pd_bin: cli.pd_bin,
+            ec_bin: cli.ec_bin,
+            capsule: cli.capsule,
+            dump: cli.dump,
+            h2o_capsule: cli.h2o_capsule,
+            // dump_ec_flash
+            // flash_full_ec
+            // flash_ec
+            // flash_ro_ec
+            // flash_rw_ec
+            driver: cli.driver,
+            test: cli.test,
+            test_retimer: cli.test_retimer,
+            boardid: cli.boardid,
+            dry_run: cli.dry_run,
+            // force
+            intrusion: cli.intrusion,
+            inputdeck: cli.inputdeck,
+            inputdeck_mode: cli.inputdeck_mode,
+            expansion_bay: cli.expansion_bay,
+            // charge_limit
+            // charge_current_limit
+            // charge_rate_limit
+            get_gpio: cli.get_gpio,
+            fp_led_level: cli.fp_led_level,
+            fp_brightness: cli.fp_brightness,
+            kblight: cli.kblight,
+            remap_key: cli.remap_key,
+            rgbkbd: cli.rgbkbd,
+            ps2_enable: cli.ps2_enable,
+            // tablet_mode
+            // touchscreen_enable
+            stylus_battery: cli.stylus_battery,
+            console: cli.console,
+            reboot_ec: cli.reboot_ec,
+            // ec_hib_delay
+            sysinfo: cli.sysinfo,
+            uptimeinfo: cli.uptimeinfo,
+            s0ix_counter: cli.s0ix_counter,
+            hello: cli.hello,
+            protoinfo: cli.protoinfo,
+            switches: cli.switches,
+            port80read: cli.port80read,
+            panicinfo: cli.panicinfo,
+            hash: cli.hash,
+            pd_addrs: cli.pd_addrs,
+            pd_ports: cli.pd_ports,
+            help: cli.help,
+            info: cli.info,
+            // flash_gpu_descriptor
+            // flash_gpu_descriptor_file
+            nvidia: cli.nvidia,
+            // allupdate
+            paginate: cli.paginate,
+            // host_command
+            ..Default::default()
+        }
+    } else {
+        cli
+    }
+}
+
+fn print_single_pd_details(pd: &PdController) {
+    if let Ok(si) = pd.get_silicon_id() {
+        println!("  Silicon ID:     0x{:X}", si);
+    } else {
+        println!("  Failed to read Silicon ID/Family");
+        return;
+    }
+    if let Ok((mode, frs)) = pd.get_device_info() {
+        println!("  Mode:           {:?}", mode);
+        println!("  Flash Row Size: {} B", frs);
+    } else {
+        println!("  Failed to device info");
+    }
+    if let Ok(port_mask) = pd.get_port_status() {
+        let ports = match port_mask {
+            1 => "0",
+            2 => "1",
+            3 => "0, 1",
+            _ => "None",
+        };
+        println!("  Ports Enabled:  {}", ports);
+    } else {
+        println!("  Ports Enabled:  Unknown");
+    }
+    pd.print_fw_info();
+}
+
+fn print_pd_details(ec: &CrosEc) {
+    if !is_framework() {
+        println!("Only supported on Framework systems");
+        return;
+    }
+    let pd_01 = PdController::new(PdPort::Right01, ec.clone());
+    let pd_23 = PdController::new(PdPort::Left23, ec.clone());
+    let pd_back = PdController::new(PdPort::Back, ec.clone());
+
+    println!("Right / Ports 01");
+    print_single_pd_details(&pd_01);
+    println!("Left / Ports 23");
+    print_single_pd_details(&pd_23);
+    println!("Back");
+    print_single_pd_details(&pd_back);
+}
+
+#[cfg(feature = "hidapi")]
+const NOT_SET: &str = "NOT SET";
+
+#[cfg(feature = "rusb")]
+fn print_audio_card_details() {
+    check_synaptics_fw_version();
+}
+
+#[cfg(feature = "hidapi")]
+fn print_dp_hdmi_details(verbose: bool) {
+    match HidApi::new() {
+        Ok(api) => {
+            for dev_info in find_devices(&api, &[HDMI_CARD_PID, DP_CARD_PID], None) {
+                let vid = dev_info.vendor_id();
+                let pid = dev_info.product_id();
+
+                let device = dev_info.open_device(&api).unwrap();
+                if let Some(name) = ccgx::hid::device_name(vid, pid) {
+                    println!("{}", name);
+                }
+
+                // On Windows this value is "Control Interface", probably hijacked by the kernel driver
+                debug!(
+                    "  Product String:  {}",
+                    dev_info.product_string().unwrap_or(NOT_SET)
+                );
+
+                debug!(
+                    "  Serial Number:        {}",
+                    dev_info.serial_number().unwrap_or(NOT_SET)
+                );
+                check_ccg_fw_version(&device, verbose);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+        }
+    };
+}
+
+fn print_tool_version() {
+    let q = "?".to_string();
+    println!("Tool Version Information");
+    println!("  Version:     {}", built_info::PKG_VERSION);
+    println!("  Built At:    {}", built_info::BUILT_TIME_UTC);
+    println!(
+        "  Git Commit:  {}",
+        built_info::GIT_COMMIT_HASH.unwrap_or(&q)
+    );
+    println!(
+        "  Git Dirty:   {}",
+        built_info::GIT_DIRTY
+            .map(|x| x.to_string())
+            .unwrap_or(q.clone())
+    );
+
+    if log_enabled!(Level::Info) {
+        println!(
+            "  Built on CI: {:?}",
+            built_info::CI_PLATFORM.unwrap_or("None")
+        );
+        println!(
+            "  Git ref:     {:?}",
+            built_info::GIT_HEAD_REF.unwrap_or(&q)
+        );
+        println!("  rustc Ver:   {}", built_info::RUSTC_VERSION);
+        println!("  Features     {:?}", built_info::FEATURES);
+        println!("  DEBUG:       {}", built_info::DEBUG);
+        println!("  Target OS:   {}", built_info::CFG_OS);
+    }
+}
+
+// TODO: Check if HDMI card is same
+#[cfg(feature = "hidapi")]
+fn flash_dp_hdmi_card(pd_bin_path: &str) {
+    let data = match fs::read(pd_bin_path) {
+        Ok(data) => Some(data),
+        // TODO: Perhaps a more user-friendly error
+        Err(e) => {
+            println!("Error {:?}", e);
+            None
+        }
+    };
+    if let Some(data) = data {
+        // TODO: Check if exists, otherwise err
+        //ccgx::hid::find_device().unwrap();
+        ccgx::hid::flash_firmware(&data);
+    } else {
+        error!("Failed to open firmware file");
+    }
+}
+
+fn active_mode(mode: &FwMode, reference: FwMode) -> &'static str {
+    if mode == &reference {
+        " (Active)"
+    } else {
+        ""
+    }
+}
+
+#[cfg(feature = "hidapi")]
+fn print_stylus_battery_level() {
+    loop {
+        if let Some(level) = touchscreen::get_battery_level() {
+            println!("Stylus Battery Strength: {}%", level);
+            return;
+        } else {
+            debug!("Stylus Battery Strength: Unknown");
+        }
+    }
+}
+
+fn print_versions(ec: &CrosEc) {
+    println!("Tool Version:     {}", built_info::PKG_VERSION);
+    println!("OS Version:       {}", os_specific::get_os_version());
+    println!("Mainboard Hardware");
+    if let Some(ver) = smbios::get_product_name() {
+        println!("  Type:           {}", ver);
+    } else {
+        println!("  Type:           Unknown");
+    }
+    if let Some(ver) = smbios::get_baseboard_version() {
+        println!("  Revision:       {:?}", ver);
+    } else {
+        println!("  Revision:       Unknown");
+    }
+    println!("UEFI BIOS");
+    if let Some(smbios) = get_smbios() {
+        if let Some(bios) = smbios.structures().find_map(|r| match r {
+            Ok(Structure::Bios(b)) => Some(b),
+            _ => None,
+        }) {
+            println!("  Version:        {}", bios.bios_version);
+            println!("  Release Date:   {}", bios.bios_release_date);
+        } else {
+            println!("  Version:        Unknown");
+        }
+    } else {
+        println!("  Version:        Unknown");
+    }
+
+    println!("EC Firmware");
+    let ver = print_err(ec.version_info()).unwrap_or_else(|| "UNKNOWN".to_string());
+    println!("  Build version:  {}", ver);
+
+    if let Some((ro, rw, curr)) = ec.flash_version() {
+        if ro != rw || log_enabled!(Level::Info) {
+            println!("  RO Version:     {}", ro);
+            println!("  RW Version:     {}", rw);
+        }
+        print!("  Current image:  ");
+        if curr == chromium_ec::EcCurrentImage::RO {
+            println!("RO");
+        } else if curr == chromium_ec::EcCurrentImage::RW {
+            println!("RW");
+        } else {
+            println!("Unknown");
+        }
+    } else {
+        println!("  RO Version:     Unknown");
+        println!("  RW Version:     Unknown");
+        println!("  Current image:  Unknown");
+    }
+
+    println!("PD Controllers");
+    let ccgx_pd_vers = ccgx::get_pd_controller_versions(ec);
+    if let Ok(PdVersions::RightLeft((right, left))) = ccgx_pd_vers {
+        if let Some(Platform::IntelGen11) = smbios::get_platform() {
+            if right.main_fw.base != right.backup_fw.base {
+                println!("  Right (01)");
+                println!(
+                    "    Main:           {}{}",
+                    right.main_fw.base,
+                    active_mode(&right.active_fw, FwMode::MainFw)
+                );
+                println!(
+                    "    Backup:         {}{}",
+                    right.backup_fw.base,
+                    active_mode(&right.active_fw, FwMode::BackupFw)
+                );
+            } else {
+                println!(
+                    "  Right (01):       {} ({:?})",
+                    right.main_fw.base, right.active_fw
+                );
+            }
+        } else if right.main_fw.app != right.backup_fw.app {
+            println!(
+                "    Main:           {}{}",
+                right.main_fw.app,
+                active_mode(&right.active_fw, FwMode::MainFw)
+            );
+            println!(
+                "    Backup:         {}{}",
+                right.backup_fw.app,
+                active_mode(&right.active_fw, FwMode::BackupFw)
+            );
+        } else {
+            println!(
+                "  Right (01):       {} ({:?})",
+                right.main_fw.app, right.active_fw
+            );
+        }
+        if let Some(Platform::IntelGen11) = smbios::get_platform() {
+            if left.main_fw.base != left.backup_fw.base {
+                println!("  Left  (23)");
+                println!(
+                    "    Main:           {}{}",
+                    left.main_fw.base,
+                    active_mode(&left.active_fw, FwMode::MainFw)
+                );
+                println!(
+                    "    Backup:         {}{}",
+                    left.backup_fw.base,
+                    active_mode(&left.active_fw, FwMode::BackupFw)
+                );
+            } else {
+                println!(
+                    "  Left  (23):       {} ({:?})",
+                    left.main_fw.base, left.active_fw
+                );
+            }
+        } else if left.main_fw.app != left.backup_fw.app {
+            println!("  Left  (23)");
+            println!(
+                "    Main:           {}{}",
+                left.main_fw.app,
+                active_mode(&left.active_fw, FwMode::MainFw)
+            );
+            println!(
+                "    Backup:         {}{}",
+                left.backup_fw.app,
+                active_mode(&left.active_fw, FwMode::BackupFw)
+            );
+        } else {
+            println!(
+                "  Left  (23):       {} ({:?})",
+                left.main_fw.app, left.active_fw
+            );
+        }
+    } else if let Ok(PdVersions::Many(versions)) = ccgx_pd_vers {
+        for (i, version) in versions.into_iter().enumerate() {
+            if version.main_fw.app != version.backup_fw.app {
+                println!("  PD {}", 1);
+                println!(
+                    "    Main:           {}{}",
+                    version.main_fw.app,
+                    active_mode(&version.active_fw, FwMode::MainFw)
+                );
+                println!(
+                    "    Backup:         {}{}",
+                    version.backup_fw.app,
+                    active_mode(&version.active_fw, FwMode::BackupFw)
+                );
+            } else {
+                println!(
+                    "  PD {}:            {} ({:?})",
+                    i, version.main_fw.app, version.active_fw
+                );
+            }
+        }
+    } else if let Ok(PdVersions::Single(pd)) = ccgx_pd_vers {
+        if pd.main_fw.app != pd.backup_fw.app {
+            println!(
+                "    Main:         {}{}",
+                pd.main_fw.app,
+                active_mode(&pd.active_fw, FwMode::MainFw)
+            );
+            println!(
+                "    Backup:       {}{}",
+                pd.backup_fw.app,
+                active_mode(&pd.active_fw, FwMode::BackupFw)
+            );
+        } else {
+            println!("  Version:        {} ({:?})", pd.main_fw.app, pd.active_fw);
+        }
+    } else if let Ok(pd_versions) = power::read_pd_version(ec) {
+        // As fallback try to get it from the EC. But not all EC versions have this command
+        debug!("  Fallback to PD Host command");
+        match pd_versions {
+            MainPdVersions::RightLeft((controller01, controller23)) => {
+                if let Some(Platform::IntelGen11) = smbios::get_platform() {
+                    println!("  Right (01):     {}", controller01.base);
+                    println!("  Left  (23):     {}", controller23.base);
+                } else {
+                    println!("  Right (01):     {}", controller01.app);
+                    println!("  Left  (23):     {}", controller23.app);
+                }
+            }
+            MainPdVersions::Single(version) => {
+                println!("  Version:        {}", version.app);
+            }
+            MainPdVersions::Many(versions) => {
+                for (i, version) in versions.into_iter().enumerate() {
+                    println!("  PD {}:          {}", i, version.app);
+                }
+            }
+        }
+    } else {
+        println!("  Unknown")
+    }
+
+    let has_retimer = matches!(
+        smbios::get_platform(),
+        Some(Platform::IntelGen11)
+            | Some(Platform::IntelGen12)
+            | Some(Platform::IntelGen13)
+            | Some(Platform::IntelCoreUltra1)
+            | Some(Platform::IntelCoreUltra3)
+            | Some(Platform::Framework12IntelCore3)
+    );
+    let mut left_retimer: Option<u32> = None;
+    let mut right_retimer: Option<u32> = None;
+    if let Some(esrt) = esrt::get_esrt() {
+        for entry in &esrt.entries {
+            match GUID::from(entry.fw_class) {
+                esrt::TGL_RETIMER01_GUID
+                | esrt::ADL_RETIMER01_GUID
+                | esrt::RPL_RETIMER01_GUID
+                | esrt::MTL_RETIMER01_GUID
+                | esrt::PTL_RETIMER01_GUID
+                | esrt::WCL_RETIMER01_GUID => {
+                    right_retimer = Some(entry.fw_version);
+                }
+                esrt::TGL_RETIMER23_GUID
+                | esrt::ADL_RETIMER23_GUID
+                | esrt::RPL_RETIMER23_GUID
+                | esrt::MTL_RETIMER23_GUID
+                | esrt::PTL_RETIMER23_GUID
+                | esrt::WCL_RETIMER23_GUID => {
+                    left_retimer = Some(entry.fw_version);
+                }
+                _ => {}
+            }
+        }
+    }
+    if has_retimer {
+        println!("Intel Retimers");
+        if let Some(fw_version) = left_retimer {
+            println!("  Left:           0x{:X} ({})", fw_version, fw_version);
+        }
+        if let Some(fw_version) = right_retimer {
+            println!("  Right:          0x{:X} ({})", fw_version, fw_version);
+        }
+        if left_retimer.is_none() && right_retimer.is_none() {
+            // This means there's a bug, we should've found one but didn't
+            println!("  Unknown");
+        }
+    } else {
+        // If we don't know the GUID, print all the device firmwares in ESRT
+        println!("Intel Retimers (Potential)");
+        if let Some(esrt) = esrt::get_esrt() {
+            for entry in esrt.entries.iter() {
+                if ResourceType::from_int(entry.fw_type) != ResourceType::DeviceFirmware {
+                    continue;
+                }
+                println!("  GUID:          {}", entry.fw_class);
+                println!(
+                    "  Version:       0x{:X} ({})",
+                    entry.fw_version, entry.fw_version
+                );
+            }
+        } else {
+            println!("Could not find and parse ESRT table.");
+        }
+    }
+    match parade_retimer::get_version(ec) {
+        // Does not exist
+        Ok(None) => {}
+        Ok(Some(ver)) => {
+            println!("Parade Retimers");
+            if let [a, b, c, d, ..] = ver.as_slice() {
+                println!("  dGPU:           {:X}.{:X}.{:X}.{:X}", a, b, c, d);
+            } else {
+                println!("  dGPU:           Unknown");
+            }
+        }
+        _err => {
+            // Only Framework Laptop 16 has dGPU support (which has Parade Retimer)
+            if smbios::get_platform().and_then(Platform::which_family)
+                == Some(PlatformFamily::Framework16)
+            {
+                println!("Parade Retimers");
+                println!("  Unknown");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    if smbios::get_platform().and_then(Platform::which_cpu_vendor) != Some(util::CpuVendor::Amd) {
+        println!("CSME");
+        if let Ok(csme) = csme::csme_from_sysfs() {
+            info!("  Enabled:          {}", csme.enabled);
+            println!("  Firmware Version: {}", csme.main_ver);
+            if csme.main_ver != csme.recovery_ver || csme.main_ver != csme.fitc_ver {
+                println!("  Recovery Ver:     {}", csme.recovery_ver);
+                println!("  Original Ver:     {}", csme.fitc_ver);
+            }
+        } else {
+            println!("  Unknown");
+        }
+    }
+    #[cfg(feature = "rusb")]
+    let _ignore_err = check_camera_version();
+
+    #[cfg(feature = "rusb")]
+    let _ignore_err = check_usbhub_version();
+
+    #[cfg(feature = "rusb")]
+    let _ignore_err = check_inputmodule_version();
+
+    #[cfg(feature = "hidapi")]
+    let _ignore_err = print_touchpad_fw_ver();
+
+    #[cfg(feature = "hidapi")]
+    {
+        let _ignore_err = touchscreen::print_himax_fw_ver();
+        if smbios::get_platform().and_then(Platform::which_family)
+            == Some(PlatformFamily::Framework12)
+        {
+            let _ignore_err = touchscreen::print_fw_ver();
+        }
+    }
+    #[cfg(feature = "hidapi")]
+    print_dp_hdmi_details(false);
+
+    #[cfg(feature = "smartmontools")]
+    print_disk_versions();
+
+    #[cfg(all(target_os = "linux", not(feature = "smartmontools")))]
+    for i in 0..4 {
+        let device = format!("/dev/nvme{i}");
+        match nvme::get_nvme_firmware_version(&device) {
+            Ok(dev) => {
+                println!("NVMe Device: {}", device);
+                println!(" Model Number:     {}", dev.model_number);
+                println!(" Firmware Version: {}", dev.firmware_version);
+            }
+            Err(_e) => {
+                // TODO: Maybe print errors but ignore "Not such file or directory"
+                // eprintln!("Failed to get firmware version for {}: {}", device, e);
+            }
+        }
+    }
+
+    #[cfg(feature = "nvidia")]
+    print_nvidia_details();
+}
+
+#[cfg(feature = "smartmontools")]
+fn print_disk_versions() {
+    match smartmon::scan_disks() {
+        Ok(disks) => {
+            for disk in disks {
+                println!(
+                    "{} Device: {} ({})",
+                    disk.protocol, disk.name, disk.dev_type
+                );
+                println!("  Model Number:     {}", disk.model);
+                if !disk.serial.is_empty() {
+                    println!("  Serial Number:    {}", disk.serial);
+                }
+                println!("  Firmware Version: {}", disk.firmware);
+            }
+        }
+        Err(err) => error!("{}", err),
+    }
+}
+
+#[cfg(feature = "nvidia")]
+fn probably_has_nvidia() -> bool {
+    match smbios::get_platform().and_then(Platform::which_family) {
+        Some(PlatformFamily::Framework12) => return false,
+        Some(PlatformFamily::Framework13) => return false,
+        Some(PlatformFamily::FrameworkDesktop) => return false,
+        _ => {}
+    }
+
+    // No Intel Framework system with nvidia so far
+    // TODO: Matching on PCI device would be better
+    if let Some(smbios) = get_smbios() {
+        if csme::me_version_from_smbios(&smbios).is_some() {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Brief NVIDIA details for --version output
+#[cfg(feature = "nvidia")]
+fn print_nvidia_details() {
+    let probably_has_nvidia = probably_has_nvidia();
+    let nvml = match Nvml::init() {
+        Ok(nvml) => nvml,
+        Err(err) => {
+            if probably_has_nvidia {
+                error!("Nvidia, library init fail: {:?}", err);
+            }
+            return;
+        }
+    };
+    let device = match nvml.device_by_index(0) {
+        Ok(device) => device,
+        Err(err) => {
+            if probably_has_nvidia {
+                error!("Nvidia, device not found: {:?}", err);
+            }
+            return;
+        }
+    };
+
+    println!("NVIDIA GPU");
+    println!(
+        "  Name:           {}",
+        device.name().unwrap_or("Unknown".to_string())
+    );
+    println!(
+        "  VBIOS Version:  {}",
+        device.vbios_version().unwrap_or("Unknown".to_string())
+    );
+}
+
+/// Detailed NVIDIA information for --nvidia command
+#[cfg(feature = "nvidia")]
+fn print_nvidia_info() {
+    let probably_has_nvidia = probably_has_nvidia();
+    let nvml = match Nvml::init() {
+        Ok(nvml) => nvml,
+        Err(err) => {
+            if probably_has_nvidia {
+                error!("Nvidia, library init fail: {:?}", err);
+            }
+            return;
+        }
+    };
+    let device = match nvml.device_by_index(0) {
+        Ok(device) => device,
+        Err(err) => {
+            if probably_has_nvidia {
+                error!("Nvidia, device not found: {:?}", err);
+            }
+            return;
+        }
+    };
+
+    println!("NVIDIA GPU");
+
+    // Basic identification
+    println!("Identification");
+    println!(
+        "  Name:              {}",
+        device.name().unwrap_or("Unknown".to_string())
+    );
+    if let Ok(arch) = device.architecture() {
+        println!("  Architecture:      {:?}", arch);
+    }
+    if let Ok(serial) = device.serial() {
+        println!("  Serial Number:     {}", serial);
+    }
+    if let Ok(part_number) = device.board_part_number() {
+        println!("  Part Number:       {}", part_number);
+    }
+    if let Ok(board_id) = device.board_id() {
+        println!("  Board ID:          {}", board_id);
+    }
+
+    // Firmware versions
+    println!("Firmware");
+    println!(
+        "  VBIOS Version:     {}",
+        device.vbios_version().unwrap_or("Unknown".to_string())
+    );
+    println!(
+        "  InfoROM Version:   {}",
+        device
+            .info_rom_image_version()
+            .unwrap_or("Unknown".to_string())
+    );
+
+    // PCI information
+    println!("PCI");
+    if let Ok(pci) = device.pci_info() {
+        println!("  Bus:               {:02X}", pci.bus);
+        println!("  Device:            {:02X}", pci.device);
+        println!("  Domain:            {:04X}", pci.domain);
+        println!("  Device ID:         {:04X}", pci.pci_device_id);
+        if let Some(sub_id) = pci.pci_sub_system_id {
+            println!("  Subsystem ID:      {:08X}", sub_id);
+        }
+    }
+
+    // Power information
+    println!("Power");
+    if let Ok(state) = device.performance_state() {
+        println!("  Performance State: {:?}", state);
+    }
+    if let Ok(power) = device.power_usage() {
+        println!("  Current Usage:     {:.2} W", power as f64 / 1000.0);
+    }
+    if let Ok(limit) = device.power_management_limit() {
+        println!("  Power Limit:       {:.2} W", limit as f64 / 1000.0);
+    }
+    if let Ok(default) = device.power_management_limit_default() {
+        println!("  Default Limit:     {:.2} W", default as f64 / 1000.0);
+    }
+    if let Ok(constraints) = device.power_management_limit_constraints() {
+        println!(
+            "  Min Limit:         {:.2} W",
+            constraints.min_limit as f64 / 1000.0
+        );
+        println!(
+            "  Max Limit:         {:.2} W",
+            constraints.max_limit as f64 / 1000.0
+        );
+    }
+    if let Ok(energy) = device.total_energy_consumption() {
+        println!("  Total Energy:      {:.2} J", energy as f64 / 1000.0);
+    }
+
+    // Thermal information
+    println!("Thermal");
+    if let Ok(temp) = device.temperature(TemperatureSensor::Gpu) {
+        println!("  GPU Temperature:   {}C", temp);
+    }
+    if let Ok(num_fans) = device.num_fans() {
+        println!("  Number of Fans:    {}", num_fans);
+    }
+
+    // Throttling
+    if let Ok(throttle) = device.current_throttle_reasons() {
+        println!("Throttle Reasons");
+        if throttle.is_empty() {
+            println!("  None");
+        } else {
+            if throttle.contains(nvml_wrapper::bitmasks::device::ThrottleReasons::GPU_IDLE) {
+                println!("  GPU Idle");
+            }
+            if throttle.contains(
+                nvml_wrapper::bitmasks::device::ThrottleReasons::APPLICATIONS_CLOCKS_SETTING,
+            ) {
+                println!("  Applications Clocks Setting");
+            }
+            if throttle.contains(nvml_wrapper::bitmasks::device::ThrottleReasons::SW_POWER_CAP) {
+                println!("  Software Power Cap");
+            }
+            if throttle.contains(nvml_wrapper::bitmasks::device::ThrottleReasons::HW_SLOWDOWN) {
+                println!("  Hardware Slowdown");
+            }
+            if throttle.contains(nvml_wrapper::bitmasks::device::ThrottleReasons::SYNC_BOOST) {
+                println!("  Sync Boost");
+            }
+            if throttle
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::SW_THERMAL_SLOWDOWN)
+            {
+                println!("  Software Thermal Slowdown");
+            }
+            if throttle
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::HW_THERMAL_SLOWDOWN)
+            {
+                println!("  Hardware Thermal Slowdown");
+            }
+            if throttle
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::HW_POWER_BRAKE_SLOWDOWN)
+            {
+                println!("  Hardware Power Brake Slowdown");
+            }
+            if throttle
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::DISPLAY_CLOCK_SETTING)
+            {
+                println!("  Display Clock Setting");
+            }
+        }
+    }
+
+    // Utilization
+    println!("Utilization");
+    if let Ok(util) = device.utilization_rates() {
+        println!("  GPU:               {}%", util.gpu);
+        println!("  Memory:            {}%", util.memory);
+    }
+
+    // Memory information
+    println!("Memory");
+    if let Ok(mem) = device.memory_info() {
+        let total_gb = mem.total as f64 / (1024.0 * 1024.0 * 1024.0);
+        let used_gb = mem.used as f64 / (1024.0 * 1024.0 * 1024.0);
+        let free_gb = mem.free as f64 / (1024.0 * 1024.0 * 1024.0);
+        println!("  Total:             {:.2} GB", total_gb);
+        println!("  Used:              {:.2} GB", used_gb);
+        println!("  Free:              {:.2} GB", free_gb);
+    }
+
+    // Display status
+    println!("Display");
+    if let Ok(active) = device.is_display_active() {
+        println!("  Active:            {}", if active { "Yes" } else { "No" });
+    }
+    if let Ok(connected) = device.is_display_connected() {
+        println!(
+            "  Connected:         {}",
+            if connected { "Yes" } else { "No" }
+        );
+    }
+}
+
+fn print_esrt() {
+    if let Some(esrt) = esrt::get_esrt() {
+        esrt::print_esrt(&esrt);
+    } else {
+        println!("Could not find and parse ESRT table.");
+    }
+}
+
+fn flash_ec(ec: &CrosEc, ec_bin_path: &str, flash_type: EcFlashType, dry_run: bool) {
+    #[cfg(feature = "uefi")]
+    let data = crate::fw_uefi::fs::shell_read_file(ec_bin_path);
+    #[cfg(not(feature = "uefi"))]
+    let data: Option<Vec<u8>> = {
+        match fs::read(ec_bin_path) {
+            Ok(data) => Some(data),
+            // TODO: Perhaps a more user-friendly error
+            Err(e) => {
+                println!("Error {:?}", e);
+                None
+            }
+        }
+    };
+
+    if let Some(data) = data {
+        println!("File");
+        println!("  Size:       {:>20} B", data.len());
+        println!("  Size:       {:>20} KB", data.len() / 1024);
+        if let Err(err) = ec.reflash(&data, flash_type, dry_run) {
+            println!("Error: {:?}", err);
+        } else {
+            println!("Success!");
+        }
+    }
+}
+
+fn dump_ec_flash(ec: &CrosEc, dump_path: &str) {
+    let flash_bin = ec.get_entire_ec_flash().unwrap();
+
+    #[cfg(not(feature = "uefi"))]
+    {
+        let mut file = fs::File::create(dump_path).unwrap();
+        file.write_all(&flash_bin).unwrap();
+    }
+    #[cfg(feature = "uefi")]
+    {
+        let ret = crate::fw_uefi::fs::shell_write_file(dump_path, &flash_bin);
+        if ret.is_err() {
+            println!("Failed to dump EC FW image.");
+        }
+    }
+}
+
+fn dump_dgpu_eeprom(ec: &CrosEc, dump_path: &str) {
+    // Read raw bytes from EEPROM
+    let raw_bytes = match ec.read_ec_gpu_chunk(0x00, 256) {
+        Ok(data) => data,
+        Err(err) => {
+            error!("Failed to read EEPROM: {:?}", err);
+            return;
+        }
+    };
+
+    // For stdout, just print the raw bytes
+    if dump_path == "-" {
+        println!("{:02X?}", raw_bytes);
+        println!("Read {} bytes from EEPROM", raw_bytes.len());
+        return;
+    }
+
+    // Check if header is valid by examining magic bytes
+    let expected_magic = [0x32, 0xAC, 0x00, 0x00];
+    let has_valid_header = raw_bytes.len() >= 4 && raw_bytes[0..4] == expected_magic;
+
+    let flash_bin = if has_valid_header {
+        // Header looks valid, try to read the full descriptor
+        match ec.read_gpu_descriptor() {
+            Ok(data) => data,
+            Err(err) => {
+                error!("GPU descriptor read failed: {:?}", err);
+                println!("Falling back to raw EEPROM dump (256 bytes)");
+                raw_bytes
+            }
+        }
+    } else {
+        error!(
+            "GPU descriptor invalid: magic {:02X?} != expected {:02X?}",
+            &raw_bytes[0..4],
+            expected_magic
+        );
+        println!("Dumping raw EEPROM (256 bytes)");
+        raw_bytes
+    };
+
+    #[cfg(not(feature = "uefi"))]
+    {
+        match fs::File::create(dump_path) {
+            Ok(mut file) => {
+                if let Err(err) = file.write_all(&flash_bin) {
+                    error!("Failed to write file: {:?}", err);
+                    return;
+                }
+            }
+            Err(err) => {
+                error!("Failed to create file: {:?}", err);
+                return;
+            }
+        }
+    }
+    #[cfg(feature = "uefi")]
+    {
+        if let Err(err) = crate::fw_uefi::fs::shell_write_file(dump_path, &flash_bin) {
+            error!("Failed to dump EC FW image: {:?}", err);
+            return;
+        }
+    }
+    println!("Wrote {} bytes to {}", flash_bin.len(), dump_path);
+}
+
+fn compare_version(device: Option<HardwareDeviceType>, version: String, ec: &CrosEc) -> i32 {
+    println!("Target Version {:?}", version);
+
+    if let Some(smbios) = get_smbios() {
+        if let Some(bios) = smbios.structures().find_map(|r| match r {
+            Ok(Structure::Bios(b)) => Some(b),
+            _ => None,
+        }) {
+            if device == Some(HardwareDeviceType::BIOS) {
+                println!("Comparing BIOS version {:?}", bios.bios_version);
+                if version.to_uppercase() == bios.bios_version.to_uppercase() {
+                    return 0;
+                } else {
+                    return 1;
+                }
+            }
+        }
+    }
+
+    match device {
+        Some(HardwareDeviceType::EC) => {
+            let ver = print_err(ec.version_info()).unwrap_or_else(|| "UNKNOWN".to_string());
+            println!("Comparing EC version {:?}", ver);
+
+            if ver.contains(&version) {
+                return 0;
+            } else {
+                return 1;
+            }
+        }
+        Some(HardwareDeviceType::PD0) => {
+            if let Ok(PdVersions::RightLeft((pd01, _pd23))) = ccgx::get_pd_controller_versions(ec) {
+                let ver = pd01.active_fw_ver();
+                println!("Comparing PD0 version {:?}", ver);
+
+                if ver.contains(&version) {
+                    return 0;
+                } else {
+                    return 1;
+                }
+            }
+        }
+        Some(HardwareDeviceType::PD1) => {
+            if let Ok(PdVersions::RightLeft((_pd01, pd23))) = ccgx::get_pd_controller_versions(ec) {
+                let ver = pd23.active_fw_ver();
+                println!("Comparing PD1 version {:?}", ver);
+
+                if ver.contains(&version) {
+                    return 0;
+                } else {
+                    return 1;
+                }
+            }
+        }
+        Some(HardwareDeviceType::AcLeft) => {
+            if let Ok((_right, left)) = power::is_charging(ec) {
+                let ver = format!("{}", left as i32);
+                println!("Comparing AcLeft {:?}", ver);
+                if ver == version {
+                    return 0;
+                } else {
+                    return 1;
+                }
+            } else {
+                error!("Failed to get charging information");
+                // Not charging is the safe default
+                return 1;
+            }
+        }
+        Some(HardwareDeviceType::AcRight) => {
+            if let Ok((right, _left)) = power::is_charging(ec) {
+                let ver = format!("{}", right as i32);
+                println!("Comparing AcRight {:?}", ver);
+                if ver == version {
+                    return 0;
+                } else {
+                    return 1;
+                }
+            } else {
+                error!("Failed to get charging information");
+                // Not charging is the safe default
+                return 1;
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(esrt) = esrt::get_esrt() {
+        for entry in &esrt.entries {
+            match GUID::from(entry.fw_class) {
+                esrt::TGL_RETIMER01_GUID | esrt::ADL_RETIMER01_GUID | esrt::RPL_RETIMER01_GUID
+                    if device == Some(HardwareDeviceType::RTM01) =>
+                {
+                    println!("Comparing RTM01 version {:?}", entry.fw_version.to_string());
+
+                    if entry.fw_version.to_string().contains(&version) {
+                        return 0;
+                    }
+                }
+                esrt::TGL_RETIMER23_GUID | esrt::ADL_RETIMER23_GUID | esrt::RPL_RETIMER23_GUID
+                    if device == Some(HardwareDeviceType::RTM23) =>
+                {
+                    println!("Comparing RTM23 version {:?}", entry.fw_version.to_string());
+                    if entry.fw_version.to_string().contains(&version) {
+                        return 0;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    1
+}
+
+pub fn run_with_args(args: &Cli, _allupdate: bool) -> i32 {
+    #[cfg(feature = "uefi")]
+    {
+        log::set_max_level(args.verbosity.0);
+    }
+    #[cfg(not(feature = "uefi"))]
+    {
+        // TOOD: Should probably have a custom env variable?
+        // let env = Env::default()
+        //     .filter("FRAMEWORK_COMPUTER_LOG")
+        //     .write_style("FRAMEWORK_COMPUTER_LOG_STYLE");
+
+        let level = args.verbosity.0.as_str();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level))
+            .format_target(false)
+            .format_timestamp(None)
+            .init();
+    }
+
+    // Must be run before any application code to set the config
+    if let (Some(pd_addrs), Some(pd_ports)) = (args.pd_addrs, args.pd_ports) {
+        let platform = Platform::GenericFramework(pd_addrs, pd_ports);
+        Config::set(platform);
+    }
+
+    let ec = if let Some(driver) = args.driver {
+        if let Some(driver) = CrosEc::with(driver) {
+            driver
+        } else {
+            println!("Selected driver {:?} not available.", driver);
+            return 1;
+        }
+    } else {
+        CrosEc::new()
+    };
+
+    #[cfg(feature = "uefi")]
+    if args.paginate {
+        enable_page_break();
+    }
+
+    if args.help {
+        // Only print with uefi feature here because without clap will already
+        // have printed the help by itself.
+        #[cfg(feature = "uefi")]
+        print_help(_allupdate);
+        return 2;
+    } else if args.versions {
+        print_versions(&ec);
+    } else if args.version {
+        print_tool_version();
+    } else if args.features {
+        print_err(ec.get_features());
+    } else if args.esrt {
+        print_esrt();
+    } else if let Some(compare_version_ver) = &args.compare_version {
+        let compare_ret = compare_version(args.device, compare_version_ver.to_string(), &ec);
+        println!("Comparison Result:  {}", compare_ret);
+        return compare_ret;
+    } else if args.intrusion {
+        println!("Chassis status:");
+        if let Some(status) = print_err(ec.get_intrusion_status()) {
+            println!(
+                "  Coin cell ever removed:   {}",
+                status.coin_cell_ever_removed
+            );
+            println!("  Chassis currently open:   {}", status.currently_open);
+            println!("  Chassis ever opened:      {}", status.ever_opened);
+            println!("  Chassis opened:           {} times", status.total_opened);
+            println!(
+                "  Chassis opened while off: {} times",
+                status.vtr_open_count
+            );
+        } else {
+            println!("  Unable to tell");
+        }
+    } else if args.inputdeck {
+        let res = match smbios::get_platform().and_then(Platform::which_family) {
+            Some(PlatformFamily::Framework12) => ec.print_fw12_inputdeck_status(),
+            Some(PlatformFamily::Framework13) => ec.print_fw13_inputdeck_status(),
+            Some(PlatformFamily::Framework16) => ec.print_fw16_inputdeck_status(),
+            // If we don't know which platform it is, we can use some heuristics
+            _ => {
+                // Only Framework Laptop 16 has this GPIO
+                if ec.get_gpio("sleep_l").is_ok() {
+                    ec.print_fw16_inputdeck_status()
+                } else {
+                    if let Ok(status) = ec.get_input_deck_status() {
+                        println!("  Deck State:          {:?}", status.state);
+                        println!(
+                            "  Touchpad present:    {} ({})",
+                            status.touchpad_present, status.touchpad_id
+                        );
+                    } else {
+                        println!("  Unable to tell");
+                    }
+                    Ok(())
+                }
+            }
+        };
+        print_err(res);
+    } else if let Some(mode) = &args.inputdeck_mode {
+        if *mode == InputDeckModeArg::Reset {
+            println!("Resetting input deck (off => auto)");
+            ec.set_input_deck_mode(DeckStateMode::ForceOff).unwrap();
+            // Make sure it has time to fully turn off
+            os_specific::sleep(100);
+            ec.set_input_deck_mode(DeckStateMode::Required).unwrap();
+        } else {
+            println!("Set mode to: {:?}", mode);
+            ec.set_input_deck_mode((*mode).into()).unwrap();
+        }
+    } else if args.expansion_bay {
+        if let Err(err) = ec.check_bay_status() {
+            error!("{:?}", err);
+        }
+        if let Ok(header) = ec.read_gpu_desc_header() {
+            println!("  Expansion Bay EEPROM");
+            println!(
+                "    Valid:       {:?}",
+                header.magic == [0x32, 0xAC, 0x00, 0x00]
+            );
+            println!("    HW Version:  {}.{}", { header.hardware_version }, {
+                header.hardware_revision
+            });
+            if log_enabled!(Level::Info) {
+                println!("    Hdr Length   {} B", { header.length });
+                println!("    Desc Ver:    {}.{}", { header.desc_ver_major }, {
+                    header.desc_ver_minor
+                });
+                println!("    Serialnumber:{:X?}", { header.serial });
+                println!("    Desc Length: {} B", { header.descriptor_length });
+                println!("    Desc CRC:    {:X}", { header.descriptor_crc32 });
+                println!("    Hdr CRC:     {:X}", { header.crc32 });
+            }
+        }
+    } else if args.nvidia {
+        #[cfg(feature = "nvidia")]
+        print_nvidia_info();
+        #[cfg(not(feature = "nvidia"))]
+        error!("Not built with nvidia feature");
+    } else if let Some(maybe_limit) = args.charge_limit {
+        print_err(handle_charge_limit(&ec, maybe_limit));
+    } else if let Some((limit, soc)) = args.charge_current_limit {
+        print_err(ec.set_charge_current_limit(limit, soc));
+    } else if let Some((limit, soc)) = args.charge_rate_limit {
+        print_err(ec.set_charge_rate_limit(limit, soc));
+    } else if let Some(gpio_name) = &args.get_gpio {
+        if let Some(gpio_name) = gpio_name {
+            print!("GPIO {}: ", gpio_name);
+            if let Ok(value) = ec.get_gpio(gpio_name) {
+                println!("{:?}", value);
+            } else {
+                println!("Not found");
+            }
+        } else {
+            print_err(ec.get_all_gpios());
+        }
+    } else if let Some(maybe_led_level) = &args.fp_led_level {
+        print_err(handle_fp_led_level(&ec, *maybe_led_level));
+    } else if let Some(maybe_brightness) = &args.fp_brightness {
+        print_err(handle_fp_brightness(&ec, *maybe_brightness));
+    } else if let Some(Some(kblight)) = args.kblight {
+        if kblight > 100 {
+            error!("--kblight must be percentage 0-100");
+        } else {
+            ec.set_keyboard_backlight(kblight);
+        }
+    } else if let Some(None) = args.kblight {
+        print!("Keyboard backlight: ");
+        if let Some(percentage) = print_err(ec.get_keyboard_backlight()) {
+            println!("{}%", percentage);
+        } else {
+            println!("Unable to tell");
+        }
+    } else if let Some((row, col, scanset)) = args.remap_key {
+        print_err(ec.remap_key(row, col, scanset));
+    } else if !args.rgbkbd.is_empty() {
+        if args.rgbkbd.len() < 2 {
+            println!(
+                "Must provide at least 2 arguments. Provided only: {}",
+                args.rgbkbd.len()
+            );
+        } else {
+            let start_key = args.rgbkbd[0] as u8;
+            let colors = args.rgbkbd[1..].iter().map(|color| RgbS {
+                r: ((color & 0x00FF0000) >> 16) as u8,
+                g: ((color & 0x0000FF00) >> 8) as u8,
+                b: (color & 0x000000FF) as u8,
+            });
+            ec.rgbkbd_set_color(start_key, colors.collect()).unwrap();
+        }
+    } else if let Some(enable) = args.ps2_enable {
+        print_err(ec.ps2_emulation_enable(enable));
+    } else if let Some(tablet_arg) = &args.tablet_mode {
+        let mode = match tablet_arg {
+            TabletModeArg::Auto => TabletModeOverride::Default,
+            TabletModeArg::Tablet => TabletModeOverride::ForceTablet,
+            TabletModeArg::Laptop => TabletModeOverride::ForceClamshell,
+        };
+        ec.set_tablet_mode(mode);
+    } else if let Some(_enable) = &args.touchscreen_enable {
+        #[cfg(feature = "hidapi")]
+        if touchscreen::enable_touch(*_enable).is_none() {
+            error!("Failed to enable/disable touch");
+        }
+    } else if let Some(_intensity) = &args.haptic_intensity {
+        #[cfg(feature = "hidapi")]
+        if let Err(e) = crate::touchpad::set_haptic_intensity(*_intensity) {
+            error!("Failed to set haptic intensity: {}", e);
+        }
+        #[cfg(not(feature = "hidapi"))]
+        error!("Not built with hidapi feature");
+    } else if let Some(_force) = &args.click_force {
+        #[cfg(feature = "hidapi")]
+        if let Err(e) = crate::touchpad::set_click_force((*_force).into()) {
+            error!("Failed to set click force: {}", e);
+        }
+        #[cfg(not(feature = "hidapi"))]
+        error!("Not built with hidapi feature");
+    } else if args.stylus_battery {
+        #[cfg(feature = "hidapi")]
+        print_stylus_battery_level();
+        #[cfg(not(feature = "hidapi"))]
+        error!("Not build with hidapi feature");
+    } else if let Some(console_arg) = &args.console {
+        match console_arg {
+            ConsoleArg::Follow => {
+                // Ignore result because we only finish when it crashes
+                let _res = ec.console_read();
+            }
+            ConsoleArg::Recent => match ec.console_read_one() {
+                Ok(output) => println!("{}", output),
+                Err(err) => println!("Failed to read console: {:?}", err),
+            },
+        }
+    } else if let Some(reboot_arg) = &args.reboot_ec {
+        match reboot_arg {
+            RebootEcArg::Reboot => match ec.reboot_ec(RebootEcCmd::ColdReboot) {
+                Ok(_) => {}
+                Err(err) => println!("Failed: {:?}", err),
+            },
+            RebootEcArg::JumpRo => match ec.jump_ro() {
+                Ok(_) => {}
+                Err(err) => println!("Failed: {:?}", err),
+            },
+            RebootEcArg::JumpRw => match ec.jump_rw() {
+                Ok(_) => {}
+                Err(err) => println!("Failed: {:?}", err),
+            },
+            RebootEcArg::CancelJump => match ec.cancel_jump() {
+                Ok(_) => {}
+                Err(err) => println!("Failed: {:?}", err),
+            },
+            RebootEcArg::DisableJump => match ec.disable_jump() {
+                Ok(_) => {}
+                Err(err) => println!("Failed: {:?}", err),
+            },
+        }
+    } else if let Some(delay) = &args.ec_hib_delay {
+        if let Some(delay) = delay {
+            print_err(ec.set_ec_hib_delay(*delay));
+        }
+        print_err(ec.get_ec_hib_delay());
+    } else if args.sysinfo {
+        print_err(ec.get_sysinfo());
+    } else if args.uptimeinfo {
+        print_err(ec.get_uptime_info());
+    } else if args.s0ix_counter {
+        if let Some(counter) = print_err(ec.get_s0ix_counter()) {
+            println!("s0ix_counter: {}", counter);
+        } else {
+            println!("s0ix_counter: Unknown");
+        }
+    } else if args.hello {
+        match ec.check_hello() {
+            Ok(()) => println!("EC says hello!"),
+            Err(err) => {
+                println!("EC hello failed: {:?}", err);
+                return 1;
+            }
+        }
+    } else if args.protoinfo {
+        if let Some(info) = print_err(ec.get_protocol_info()) {
+            let versions = { info.protocol_versions };
+            let max_request = { info.max_request_packet_size };
+            let max_response = { info.max_response_packet_size };
+            let flags = { info.flags };
+            println!("Protocol info:");
+            print!("  protocol versions:");
+            for i in 0..32 {
+                if versions & (1 << i) != 0 {
+                    print!(" {}", i);
+                }
+            }
+            println!();
+            println!("  max request:  {:4} bytes", max_request);
+            println!("  max response: {:4} bytes", max_response);
+            println!("  flags: {:#010x}", flags);
+            if flags & EC_PROTOCOL_INFO_IN_PROGRESS_SUPPORTED != 0 {
+                println!("    EC_RES_IN_PROGRESS supported");
+            }
+        } else {
+            return 1;
+        }
+    } else if args.switches {
+        if power::print_switches(&ec).is_none() {
+            println!("Failed to read EC switch state");
+            return 1;
+        }
+    } else if args.port80read {
+        match ec.port80_read() {
+            Ok(history) => print_port80_history(&history),
+            Err(err) => {
+                println!("Failed to read port 80 history: {:?}", err);
+                return 1;
+            }
+        }
+    } else if args.panicinfo {
+        match ec.get_panic_info() {
+            Ok(data) => {
+                if data.is_empty() {
+                    println!("No panic data.");
+                } else {
+                    chromium_ec::panic::print_panic_info(&data);
+                }
+            }
+            Err(err) => {
+                println!("Failed to get panic info: {:?}", err);
+                return 1;
+            }
+        }
+    } else if args.test {
+        println!("Self-Test");
+        let result = selftest(&ec);
+        if result.is_none() {
+            println!("FAILED!!");
+            return 1;
+        }
+    } else if args.test_retimer {
+        println!("Retimer Self-Test");
+        if let Err(err) = selftest_retimer(&ec) {
+            println!("  Failed: {:?}", err);
+        }
+    } else if args.boardid {
+        print_board_ids(&ec);
+    } else if args.power {
+        return power::get_and_print_power_info(&ec);
+    } else if let Some(smartbattery_arg) = &args.smartbattery {
+        #[cfg(not(feature = "uefi"))]
+        {
+            use crate::smart_battery::{display_battery_data, BatteryData};
+            use std::path::Path;
+
+            match smartbattery_arg {
+                Some(file_path) => {
+                    // Load from file
+                    match BatteryData::read_from_file(Path::new(file_path)) {
+                        Ok(data) => display_battery_data(&data),
+                        Err(e) => eprintln!("Failed to read battery dump: {}", e),
+                    }
+                }
+                None => {
+                    // Read from actual battery
+                    let bat = SmartBattery::new();
+                    print_err(bat.dump_data(&ec));
+                }
+            }
+        }
+    } else if args.smartbattery_auth {
+        #[cfg(not(feature = "uefi"))]
+        {
+            let bat = SmartBattery::new();
+            print_err(bat.interactive_authenticate(&ec));
+        }
+    } else if args.thermal {
+        power::print_thermal(&ec);
+    } else if args.thermalget {
+        if power::print_thermal_thresholds(&ec).is_none() {
+            println!("Failed to read thermal thresholds");
+            return 1;
+        }
+    } else if let Some(values) = &args.thermalset {
+        // Sensor number followed by up to 5 thresholds
+        let sensor = values[0];
+        if sensor < 0 {
+            println!("Sensor number must not be negative");
+            return 1;
+        }
+        if let Err(err) = power::set_thermal_thresholds(&ec, sensor as u32, &values[1..]) {
+            println!("Failed to set thermal thresholds: {:?}", err);
+            return 1;
+        }
+        // Show the resulting configuration
+        let _ = power::print_thermal_thresholds(&ec);
+    } else if args.sensors {
+        power::print_sensors(&ec);
+    } else if let Some((fan, percent)) = args.fansetduty {
+        print_err(ec.fan_set_duty(fan, percent));
+    } else if let Some((fan, rpm)) = args.fansetrpm {
+        print_err(ec.fan_set_rpm(fan, rpm));
+    } else if let Some(Some(fan_id)) = args.autofanctrl {
+        print_err(ec.autofanctrl(Some(fan_id)));
+    } else if let Some(None) = args.autofanctrl {
+        print_err(ec.autofanctrl(None));
+    } else if args.pdports {
+        power::get_and_print_cypd_pd_info(&ec);
+    } else if args.pdports_chromebook {
+        power::get_and_print_pd_info(&ec);
+    } else if args.info {
+        smbios_info();
+    } else if let Some(dump_path) = &args.meinfo {
+        let verbose = args.verbosity.0 >= log::LevelFilter::Warn;
+        me_info(verbose, dump_path.as_deref());
+    } else if args.pd_info {
+        print_pd_details(&ec);
+    } else if let Some(pd) = args.pd_reset {
+        println!("Resetting PD {}...", pd);
+        print_err(match pd {
+            0 => PdController::new(PdPort::Right01, ec.clone()).reset_device(),
+            1 => PdController::new(PdPort::Left23, ec.clone()).reset_device(),
+            2 => PdController::new(PdPort::Back, ec.clone()).reset_device(),
+            _ => {
+                error!("PD {} does not exist", pd);
+                Ok(())
+            }
+        });
+    } else if let Some(pd) = args.pd_disable {
+        println!("Disabling PD {}...", pd);
+        print_err(match pd {
+            0 => PdController::new(PdPort::Right01, ec.clone()).enable_ports(false),
+            1 => PdController::new(PdPort::Left23, ec.clone()).enable_ports(false),
+            2 => PdController::new(PdPort::Back, ec.clone()).enable_ports(false),
+            _ => {
+                error!("PD {} does not exist", pd);
+                Ok(())
+            }
+        });
+    } else if let Some(pd) = args.pd_enable {
+        println!("Enabling PD {}...", pd);
+        print_err(match pd {
+            0 => PdController::new(PdPort::Right01, ec.clone()).enable_ports(true),
+            1 => PdController::new(PdPort::Left23, ec.clone()).enable_ports(true),
+            2 => PdController::new(PdPort::Back, ec.clone()).enable_ports(true),
+            _ => {
+                error!("PD {} does not exist", pd);
+                Ok(())
+            }
+        });
+    } else if args.dp_hdmi_info {
+        #[cfg(feature = "hidapi")]
+        print_dp_hdmi_details(true);
+    } else if let Some(pd_bin_path) = &args.dp_hdmi_update {
+        #[cfg(feature = "hidapi")]
+        flash_dp_hdmi_card(pd_bin_path);
+        #[cfg(not(feature = "hidapi"))]
+        let _ = pd_bin_path;
+    } else if args.audio_card_info {
+        #[cfg(feature = "rusb")]
+        print_audio_card_details();
+    } else if args.privacy {
+        if let Some((mic, cam)) = print_err(ec.get_privacy_info()) {
+            println!("Privacy Slider (Black = Device Connected; Red = Device Disconnected)");
+            println!(
+                "  Microphone:  {}",
+                if mic { "Connected" } else { "Disconnected" }
+            );
+            println!(
+                "  Camera:      {}",
+                if cam { "Connected" } else { "Disconnected" }
+            );
+        } else {
+            println!("Not all EC versions support this comand.")
+        };
+    } else if let Some((command_id, command_version, ref data)) = args.host_command {
+        match ec.send_command(command_id, command_version, data) {
+            Ok(response) => {
+                println!("Response ({} bytes):", response.len());
+                if response.is_empty() {
+                    println!("  (empty)");
+                } else {
+                    util::print_multiline_buffer(&response, 0);
+                }
+            }
+            Err(e) => println!("EC command failed: {:?}", e),
+        }
+    } else if let Some(pd_bin_path) = &args.pd_bin {
+        #[cfg(feature = "uefi")]
+        let data: Option<Vec<u8>> = crate::fw_uefi::fs::shell_read_file(pd_bin_path);
+        #[cfg(not(feature = "uefi"))]
+        let data = match fs::read(pd_bin_path) {
+            Ok(data) => Some(data),
+            // TODO: Perhaps a more user-friendly error
+            Err(e) => {
+                println!("Error {:?}", e);
+                None
+            }
+        };
+
+        if let Some(data) = data {
+            println!("File");
+            println!("  Size:       {:>20} B", data.len());
+            println!("  Size:       {:>20} KB", data.len() / 1024);
+            analyze_ccgx_pd_fw(&data);
+        }
+    } else if let Some(ec_bin_path) = &args.ec_bin {
+        #[cfg(feature = "uefi")]
+        let data: Option<Vec<u8>> = crate::fw_uefi::fs::shell_read_file(ec_bin_path);
+        #[cfg(not(feature = "uefi"))]
+        let data = match fs::read(ec_bin_path) {
+            Ok(data) => Some(data),
+            // TODO: Perhaps a more user-friendly error
+            Err(e) => {
+                println!("Error {:?}", e);
+                None
+            }
+        };
+
+        if let Some(data) = data {
+            println!("File");
+            println!("  Size:       {:>20} B", data.len());
+            println!("  Size:       {:>20} KB", data.len() / 1024);
+            analyze_ec_fw(&data);
+        }
+    } else if let Some(capsule_path) = &args.capsule {
+        #[cfg(feature = "uefi")]
+        let data: Option<Vec<u8>> = crate::fw_uefi::fs::shell_read_file(capsule_path);
+        #[cfg(not(feature = "uefi"))]
+        let data = match fs::read(capsule_path) {
+            Ok(data) => Some(data),
+            // TODO: Perhaps a more user-friendly error
+            Err(e) => {
+                println!("Error {:?}", e);
+                None
+            }
+        };
+
+        if let Some(data) = data {
+            println!("File");
+            println!("  Size:       {:>20} B", data.len());
+            println!("  Size:       {:>20} KB", data.len() / 1024);
+            if let Some(header) = analyze_capsule(&data) {
+                if header.capsule_guid == CGuid::from(esrt::WINUX_GUID) {
+                    let ux_header = capsule::parse_ux_header(&data);
+                    if let Some(dump_path) = &args.dump {
+                        // TODO: Better error handling, rather than just panicking
+                        capsule::dump_winux_image(&data, &ux_header, dump_path);
+                    }
+                }
+            } else {
+                println!("Capsule is invalid.");
+            }
+        }
+    } else if let Some(capsule_path) = &args.h2o_capsule {
+        #[cfg(feature = "uefi")]
+        let data = crate::fw_uefi::fs::shell_read_file(capsule_path);
+        #[cfg(not(feature = "uefi"))]
+        let data = match fs::read(capsule_path) {
+            Ok(data) => Some(data),
+            // TODO: Perhaps a more user-friendly error
+            Err(e) => {
+                println!("Error {:?}", e);
+                None
+            }
+        };
+
+        if let Some(data) = data {
+            println!("File");
+            println!("  Size:       {:>20} B", data.len());
+            println!("  Size:       {:>20} KB", data.len() / 1024);
+            if let Some(cap) = find_bios_version(&data) {
+                println!("  BIOS Platform:{:>18}", cap.platform);
+                println!("  BIOS Version: {:>18}", cap.version);
+            }
+            if let Some(ec_bin) = find_ec_in_bios_cap(&data) {
+                debug!("Found EC binary in BIOS capsule");
+                analyze_ec_fw(ec_bin);
+            } else {
+                debug!("Didn't find EC binary in BIOS capsule");
+            }
+            if let Some(pd_bin) = find_pd_in_bios_cap(&data) {
+                debug!("Found PD binary in BIOS capsule");
+                analyze_ccgx_pd_fw(pd_bin);
+            } else {
+                debug!("Didn't find PD binary in BIOS capsule");
+            }
+        }
+    } else if let Some(dump_path) = &args.dump_ec_flash {
+        println!("Dumping to {}", dump_path);
+        // TODO: Should have progress indicator
+        dump_ec_flash(&ec, dump_path);
+    } else if let Some(ec_bin_path) = &args.flash_full_ec {
+        if args.force {
+            flash_ec(&ec, ec_bin_path, EcFlashType::Full, args.dry_run);
+        } else {
+            error!("Flashing full EC flash is unsafe. Use --flash-ec instead");
+        }
+    } else if let Some(ec_bin_path) = &args.flash_ec {
+        if args.force {
+            flash_ec(&ec, ec_bin_path, EcFlashType::Both, args.dry_run);
+        } else {
+            error!("Flashing EC RO region is unsafe. Use --flash-ec-rw instead");
+        }
+    } else if let Some(ec_bin_path) = &args.flash_ro_ec {
+        if args.force {
+            flash_ec(&ec, ec_bin_path, EcFlashType::Ro, args.dry_run);
+        } else {
+            error!("Flashing EC RO region is unsafe. Use --flash-ec-rw instead");
+        }
+    } else if let Some(ec_bin_path) = &args.flash_rw_ec {
+        flash_ec(&ec, ec_bin_path, EcFlashType::Rw, args.dry_run);
+    } else if let Some(hash_file) = &args.hash {
+        println!("Hashing file: {}", hash_file);
+        #[cfg(feature = "uefi")]
+        let data = crate::fw_uefi::fs::shell_read_file(hash_file);
+        #[cfg(not(feature = "uefi"))]
+        let data = match fs::read(hash_file) {
+            Ok(data) => Some(data),
+            // TODO: Perhaps a more user-friendly error
+            Err(e) => {
+                println!("Error {:?}", e);
+                None
+            }
+        };
+        if let Some(data) = data {
+            println!("File");
+            println!("  Size:       {:>20} B", data.len());
+            println!("  Size:       {:>20} KB", data.len() / 1024);
+            hash(&data);
+        }
+    } else if let Some(gpu_descriptor) = &args.flash_gpu_descriptor {
+        let res = ec.set_gpu_serial(gpu_descriptor.0, gpu_descriptor.1.to_ascii_uppercase());
+        match res {
+            Ok(1) => println!("GPU Descriptor successfully written"),
+            Ok(x) => println!("GPU Descriptor write failed with status code:  {}", x),
+            Err(err) => println!("GPU Descriptor write failed with error:  {:?}", err),
+        }
+    } else if let Some(gpu_descriptor_file) = &args.flash_gpu_descriptor_file {
+        if matches!(
+            smbios::get_family(),
+            Some(PlatformFamily::Framework16) | None
+        ) {
+            #[cfg(feature = "uefi")]
+            let data: Option<Vec<u8>> = crate::fw_uefi::fs::shell_read_file(gpu_descriptor_file);
+            #[cfg(not(feature = "uefi"))]
+            let data = match fs::read(gpu_descriptor_file) {
+                Ok(data) => Some(data),
+                // TODO: Perhaps a more user-friendly error
+                Err(e) => {
+                    println!("Error {:?}", e);
+                    None
+                }
+            };
+            if let Some(data) = data {
+                println!("File");
+                println!("  Size:       {:>20} B", data.len());
+                println!("  Size:       {:>20} KB", data.len() / 1024);
+                let res = ec.set_gpu_descriptor(&data, args.dry_run);
+                match res {
+                    Ok(()) => {
+                        println!("GPU Descriptor successfully written");
+                        println!("Validating GPU Descriptor...");
+                        match ec.validate_gpu_descriptor(&data) {
+                            Ok(true) => println!("  Validation passed"),
+                            Ok(false) => println!("  Validation FAILED: read-back mismatch"),
+                            Err(err) => println!("  Validation error: {:?}", err),
+                        }
+                    }
+                    Err(err) => println!("GPU Descriptor write failed with error:  {:?}", err),
+                }
+            }
+        } else {
+            println!("Unsupported on this platform");
+        }
+    } else if let Some(dump_path) = &args.dump_gpu_descriptor_file {
+        if dump_path != "-" {
+            println!("Dumping to {}", dump_path);
+        }
+        dump_dgpu_eeprom(&ec, dump_path);
+    } else if let Some(validate_path) = &args.validate_gpu_descriptor_file {
+        #[cfg(feature = "uefi")]
+        let data: Option<Vec<u8>> = crate::fw_uefi::fs::shell_read_file(validate_path);
+        #[cfg(not(feature = "uefi"))]
+        let data = match fs::read(validate_path) {
+            Ok(data) => Some(data),
+            Err(e) => {
+                println!("Error {:?}", e);
+                None
+            }
+        };
+        if let Some(data) = data {
+            println!("Validating GPU Descriptor against {}", validate_path);
+            match ec.validate_gpu_descriptor(&data) {
+                Ok(true) => println!("  Validation passed"),
+                Ok(false) => println!("  Validation FAILED: read-back mismatch"),
+                Err(err) => println!("  Validation error: {:?}", err),
+            }
+        }
+    }
+
+    0
+}
+
+// Only on UEFI. Clap prints this by itself
+#[cfg(feature = "uefi")]
+fn print_help(updater: bool) {
+    println!(
+        r#"Swiss army knife for Framework laptops
+
+Usage: framework_tool [OPTIONS]
+
+Options:
+  -v, --verbose...           More output per occurrence
+  -q, --quiet...             Less output per occurrence
+      --versions             List current firmware versions
+      --version              Show tool version information (Add -vv for more detailed information)
+      --features             Show features support by the firmware
+      --esrt                 Display the UEFI ESRT table
+      --device <DEVICE>      Device used to compare firmware version [possible values: bios, ec, pd0, pd1, rtm01, rtm23]
+      --compare-version      Version string used to match firmware version (use with --device)
+      --power                Show current power status (battery and AC)
+      --thermal              Print thermal information (Temperatures and Fan speed)
+      --thermalget           Print thermal thresholds of the temperature sensors
+      --thermalset <SENSOR> <WARN> [<HIGH> [<HALT> [<FAN_OFF> [<FAN_MAX>]]]]
+                             Set thermal thresholds of a sensor in degrees Celsius
+                             (-1 keeps the current threshold, 0 disables it)
+      --sensors              Print sensor information (ALS, G-Sensor)
+      --fansetduty           Set fan duty cycle (0-100%)
+      --fansetrpm            Set fan RPM (limited by EC fan table max RPM)
+      --autofanctrl [<FANID>]Turn on automatic fan speed control (optionally provide fan index)
+      --pdports              Show USB-C PD port state
+      --pdports-chromebook   Show PD port info (generic Chromium EC)
+      --info                 Show info from SMBIOS (Only on UEFI)
+      --meinfo [<DUMPFILE>]   Show Intel ME information (from SMBIOS type 0xDB)
+      --pd-info              Show details about the PD controllers
+      --pd-reset <PD_NUM>    Reset a specific PD controller (for debugging only)
+      --pd-disable <PD_NUM>  Disable all ports on a specific PD controller (for debugging only)
+      --pd-enable <PD_NUM>   Enable all ports on a specific PD controller (for debugging only)
+      --privacy              Show privacy switch statuses (camera and microphone)
+      --pd-bin <PD_BIN>      Parse versions from PD firmware binary file
+      --ec-bin <EC_BIN>      Parse versions from EC firmware binary file
+      --capsule <CAPSULE>    Parse UEFI Capsule information from binary file
+      --dump <DUMP>          Dump extracted UX capsule bitmap image to a file
+      --h2o-capsule <H2O_CAPSULE>      Parse UEFI Capsule information from binary file
+      --dump-ec-flash <DUMP_EC_FLASH>  Dump EC flash contents
+      --flash-ec <FLASH_EC>            Flash EC with new firmware from file
+      --flash-ro-ec <FLASH_EC>         Flash EC with new firmware from file
+      --flash-rw-ec <FLASH_EC>         Flash EC with new firmware from file
+      --reboot-ec            Control EC RO/RW jump [possible values: reboot, jump-ro, jump-rw, cancel-jump, disable-jump]
+      --ec-hib-delay [<SECONDS>]   Get or set EC hibernate delay (S5 to G3)
+      --sysinfo              Show system info (reset flags, current image, locked state)
+      --uptimeinfo           Show EC uptime information
+      --s0ix-counter         Show S0ix counter
+      --hello                Check basic communication with EC
+      --protoinfo            Show EC host command protocol info
+      --switches             Show current EC switch positions (lid, power button, ...)
+      --port80read           Show history of port 80 writes (POST codes)
+      --panicinfo            Show saved EC panic info
+      --intrusion            Show status of intrusion switch
+      --inputdeck            Show status of the input deck
+      --inputdeck-mode       Set input deck power mode [possible values: auto, off, on] (Laptop 12, 13, 16)
+      --expansion-bay        Show status of the expansion bay (Laptop 16 only)
+      --nvidia               Show NVIDIA GPU information (Laptop 16 only)
+      --charge-limit [<VAL>] Get or set battery charge limit (Percentage number as arg, e.g. '100')
+      --charge-current-limit [<VAL>] Get or set battery current charge limit (Percentage number as arg, e.g. '100')
+      --charge-rate-limit [<VAL>]   Set max charge rate limit
+      --get-gpio <GET_GPIO>  Get GPIO value by name or all, if no name provided
+      --fp-led-level [<VAL>] Get or set fingerprint LED brightness level [possible values: high, medium, low]
+      --fp-brightness [<VAL>]Get or set fingerprint LED brightness percentage
+      --kblight [<KBLIGHT>]  Set keyboard backlight percentage or get, if no value provided
+      --remap-key <ROW> <COL> <SCANCODE>
+                             Remap a key by changing the scancode
+      --rgbkbd <START> <HEXCOLOR> [<HEXCOLOR> ...]
+                             Set the color of a key to RGB. Multiple colors for adjacent keys can be set at once
+      --tablet-mode <MODE>   Set tablet mode override [possible values: auto, tablet, laptop]
+      --console <CONSOLE>    Get EC console, choose whether recent or to follow the output [possible values: recent, follow]
+      --hash <HASH>          Hash a file of arbitrary data
+      --flash-gpu-descriptor <MAGIC> <18 DIGIT SN> Overwrite the GPU bay descriptor SN and type.
+      --flash-gpu-descriptor-file <DESCRIPTOR_FILE> Write the GPU bay descriptor with a descriptor file.
+      --dump-gpu-descriptor-file <DESCRIPTOR_FILE> Dump the GPU bay descriptor to a file
+  -f, --force                Force execution of an unsafe command - may render your hardware unbootable!
+      --dry-run              Simulate execution of a command (e.g. --flash-ec)
+      --pd-addrs <PD_ADDR_LEFT> <PD_ADDR_RIGHT>  <PD_ADDR_BACK>
+          Specify I2C addresses of the PD chips (Advanced)
+      --pd-ports <PD_PORT_LEFT> <PD_PORT_RIGHT>  <PD_PORT_BACK>
+          Specify I2C ports of the PD chips (Advanced)
+      --has-mec <HAS_MEC>
+          Specify the type of EC chip (MEC/MCHP or other) [possible values: true, false]
+      --host-command <CMD_ID> <VERSION> [DATA...]
+                             Send an EC host command
+  -t, --test                 Run self-test to check if interaction with EC is possible
+      --test-retimer         Run self-test to check if interaction with retimers is possible
+      --boardid              Print all board IDs
+  -h, --help                 Print help information
+  -b                         Print output one screen at a time
+    "#
+    );
+    if updater {
+        println!(
+            r#"
+        --allupdate   - Run procedure to update everything (Involves some manual steps)
+    "#
+        );
+    }
+    // TODO: Not supported yet
+    //println!(
+    //    r#"
+    //    --raw-command - Send a raw command to the EC
+    //                    Example: raw-command 0x3E14
+    //"#
+    //);
+}
+
+/// Useful to hash update files to check integrity
+fn hash(data: &[u8]) {
+    let mut sha256_hasher = Sha256::new();
+    let mut sha384_hasher = Sha384::new();
+    let mut sha512_hasher = Sha512::new();
+
+    sha256_hasher.update(data);
+    sha384_hasher.update(data);
+    sha512_hasher.update(data);
+
+    let sha256 = &sha256_hasher.finalize()[..];
+    let sha384 = &sha384_hasher.finalize()[..];
+    let sha512 = &sha512_hasher.finalize()[..];
+
+    println!("Hashes");
+    print!("  SHA256:  ");
+    util::print_buffer(sha256);
+    print!("  SHA384:  ");
+    util::print_buffer(sha384);
+    print!("  SHA512:  ");
+    util::print_buffer(sha512);
+}
+
+fn print_board_ids(ec: &CrosEc) {
+    println!("Board IDs");
+    println!(
+        "  Mainboard:    {:?}",
+        ec.read_board_id_hc(BoardIdType::Mainboard)
+    );
+    println!(
+        "  PowerButton:  {:?}",
+        ec.read_board_id_hc(BoardIdType::PowerButtonBoard)
+    );
+    println!(
+        "  Touchpad:     {:?}",
+        ec.read_board_id_hc(BoardIdType::Touchpad)
+    );
+    println!(
+        "  AudioBoard:   {:?}",
+        ec.read_board_id_hc(BoardIdType::AudioBoard)
+    );
+    println!(
+        "  dGPU0:        {:?}",
+        ec.read_board_id_hc(BoardIdType::DGpu0)
+    );
+    println!(
+        "  dGPU1:        {:?}",
+        ec.read_board_id_hc(BoardIdType::DGpu1)
+    );
+}
+
+/// Print the port 80 history like ectool does, oldest to newest code,
+/// with markers where the system reset or resumed
+fn print_port80_history(history: &Port80History) {
+    let head = history.writes as usize;
+    let tail = head.saturating_sub(history.history_size as usize);
+    print!("Port 80 writes");
+    let mut printed = 0;
+    for i in tail..head {
+        let code = history.codes[i % history.codes.len()];
+        match code {
+            PORT_80_EVENT_RESUME => {
+                print!("\n(S3->S0)");
+                printed = 0;
+            }
+            PORT_80_EVENT_RESET => {
+                print!("\n(RESET)");
+                printed = 0;
+            }
+            _ => {
+                if printed % 20 == 0 {
+                    print!("\n ");
+                }
+                printed += 1;
+                print!(" {:02x}", code);
+            }
+        }
+    }
+    println!(" <--new");
+    println!("done.");
+}
+
+fn selftest(ec: &CrosEc) -> Option<()> {
+    if let Some(platform) = smbios::get_platform() {
+        println!("  SMBIOS Platform:     {:?}", platform);
+    } else {
+        println!("  SMBIOS Platform:     Unknown");
+        println!();
+        println!("Specify custom platform parameters with --pd-ports --pd-addrs");
+        return None;
+    };
+    let family = smbios::get_platform().and_then(Platform::which_family);
+
+    println!("  Dump EC memory region");
+    if let Some(mem) = ec.dump_mem_region() {
+        util::print_multiline_buffer(&mem, 0);
+    } else {
+        println!("    Failed to read EC memory region");
+        return None;
+    }
+
+    println!("  Checking EC memory mapped magic bytes");
+    print_err(ec.check_mem_magic())?;
+    println!("  Verified that Framework EC is present!");
+
+    print!("  Checking basic EC communication");
+    print_err(ec.check_hello())?;
+    println!(" - OK");
+
+    println!("  Reading EC Build Version");
+    print_err(ec.version_info())?;
+
+    print!("  Reading EC Flash by EC");
+    ec.flash_version()?;
+    println!(" - OK");
+
+    println!("  Reading EC Flash directly - See below");
+    ec.test_ec_flash_read().ok()?;
+
+    print!("  Getting power info from EC");
+    power::power_info(ec)?;
+    println!(" - OK");
+
+    println!("  Getting AC info from EC");
+    if family != Some(PlatformFamily::FrameworkDesktop) {
+        // All our laptops have at least 4 PD ports so far
+        if power::get_pd_info(ec, 4).iter().any(|x| x.is_err()) {
+            println!("    Failed to get PD Info from EC");
+            return None;
+        }
+    }
+
+    print!("Reading PD Version from EC");
+    if let Err(err) = power::read_pd_version(ec) {
+        // TGL does not have this command, so we have to ignore it
+        if err != EcError::Response(EcResponseStatus::InvalidCommand) {
+            println!();
+            println!("Err: {:?}", err);
+        } else {
+            println!(" - Skipped");
+        }
+    } else {
+        println!(" - OK");
+    }
+
+    let pd_01 = PdController::new(PdPort::Right01, ec.clone());
+    let pd_23 = PdController::new(PdPort::Left23, ec.clone());
+    let pd_back = PdController::new(PdPort::Back, ec.clone());
+    if family != Some(PlatformFamily::FrameworkDesktop) {
+        print!("  Getting PD01 info through I2C tunnel");
+        print_err(pd_01.get_silicon_id())?;
+        print_err(pd_01.get_device_info())?;
+        print_err(pd_01.get_fw_versions())?;
+        println!(" - OK");
+        print!("  Getting PD23 info through I2C tunnel");
+        print_err(pd_23.get_silicon_id())?;
+        print_err(pd_23.get_device_info())?;
+        print_err(pd_23.get_fw_versions())?;
+        println!(" - OK");
+    } else if matches!(
+        family,
+        Some(PlatformFamily::FrameworkDesktop) | Some(PlatformFamily::Framework16)
+    ) {
+        print!("  Getting Back PD info through I2C tunnel");
+        print_err(pd_back.get_silicon_id())?;
+        print_err(pd_back.get_device_info())?;
+        print_err(pd_back.get_fw_versions())?;
+        println!(" - OK");
+    }
+
+    Some(())
+}
+
+// Platforms that have Retimers
+// Retimer I2C is always connected to the CPU, except for the Framework Laptop 16 dGPU retimer.
+//
+// - Framework Laptop 12
+//   - No Retimer, only retimer for both left ports (no firmware)
+// - Framework Laptop 13 Intel
+//   - One Intel retimer for each port (with firmware)
+// - Framework Laptop 13 AMD 7040
+//   - Kandou Retimer on top two ports (no firmware)
+//   - Analogix Retimer on bottom two ports (no firmware)
+// - Framework Laptop 13 AMD AI 300
+//   - Parade Retimer on top two ports (with firmware)
+//   - Analogix Retimer on bottom two ports (no firmware)
+// - Framework Laptop 16 AMD 7040
+//   - Kandou Retimer on top two ports (no firmware)
+//   - Analogix Retimer on lower and middle left ports (no firmware)
+// - Framework Laptop 16 AMD AI 300
+//   - Parade Retimer on top two ports (with firmware)
+// - Framework Laptop 16 AMD dGPU
+//   - None
+// - Framework Laptop 16 NVIDIA dGPU
+//   - Parade Retimer
+// - Framework Desktop
+//   - Parade Retimer on both back ports (with firmware)
+fn selftest_retimer(ec: &CrosEc) -> EcResult<()> {
+    // TODO: Make sure that it can work for the NVIDIA dGPU retimer and increase to 3
+    for i in 0..2 {
+        let update_mode = ec.retimer_in_fwupd_mode(i);
+        if update_mode == Err(EcError::Response(EcResponseStatus::InvalidParameter)) {
+            println!("  Retimer status not supported on this platform. Cannot test");
+            return Ok(());
+        }
+        println!("  Retimers on PD Controller {}", i);
+        println!(
+            "    In update mode: {:?}",
+            ec.retimer_in_fwupd_mode(i).unwrap()
+        );
+        if update_mode? {
+            println!("      Disabling it to start test.");
+            ec.retimer_enable_fwupd(i, false)?;
+        }
+
+        println!("    Enabling update mode");
+        let success = ec.retimer_enable_fwupd(i, true);
+        println!(
+            "    In update mode: {:?}",
+            ec.retimer_in_fwupd_mode(i).unwrap()
+        );
+
+        println!("    Disabling update mode");
+        ec.retimer_enable_fwupd(i, false)?;
+        os_specific::sleep(100);
+        println!(
+            "    In update mode: {:?}",
+            ec.retimer_in_fwupd_mode(i).unwrap()
+        );
+        success?;
+    }
+    Ok(())
+}
+
+fn smbios_info() {
+    println!("Summary");
+    println!("  Is Framework: {}", is_framework());
+    if let Some(platform) = smbios::get_platform() {
+        println!("  Platform:     {:?}", platform);
+    } else {
+        println!("  Platform:     Unknown",);
+    }
+
+    let smbios = get_smbios();
+    if smbios.is_none() {
+        error!("Failed to find SMBIOS");
+        return;
+    }
+    for result in smbios.unwrap().structures() {
+        match result {
+            Ok(Structure::Bios(data)) => {
+                println!("BIOS Information");
+                if !data.vendor.is_empty() {
+                    println!("  Vendor:       {}", data.vendor);
+                }
+                if !data.bios_version.is_empty() {
+                    println!("  Version:      {}", data.bios_version);
+                }
+                if !data.bios_release_date.is_empty() {
+                    println!("  Release Date: {}", data.bios_release_date);
+                }
+            }
+            Ok(Structure::System(data)) => {
+                println!("System Information");
+                if !data.version.is_empty() {
+                    let version = data.version;
+                    // Assumes it's ASCII, which is guaranteed by SMBIOS
+                    let config_digit0 = &version[0..1];
+                    let config_digit0 = u8::from_str_radix(config_digit0, 16);
+                    if let Ok(version_config) =
+                        config_digit0.map(<ConfigDigit0 as FromPrimitive>::from_u8)
+                    {
+                        println!("  Version:      {:?} ({})", version_config, version);
+                    } else {
+                        println!("  Version:      '{}'", version);
+                    }
+                }
+                if !data.manufacturer.is_empty() {
+                    println!("  Manufacturer: {}", data.manufacturer);
+                }
+                if !data.product.is_empty() {
+                    println!("  Product Name: {}", data.product);
+                }
+                if let Some(wakeup) = data.wakeup {
+                    println!("  Wake-Up-Type: {:?}", wakeup);
+                }
+                if let Some(sku) = data.sku {
+                    if !sku.is_empty() {
+                        println!("  SKU Number:   {}", sku);
+                    }
+                }
+                if !data.serial.is_empty() {
+                    println!("  Serial Number:{}", data.serial);
+                }
+                if let Some(family) = data.family {
+                    if !family.is_empty() {
+                        println!("  Family:       {}", family);
+                    }
+                }
+            }
+            Ok(Structure::Enclosure(data)) => {
+                println!("System Chassis Information");
+                println!("  Type:         {}", data.enclosure_type);
+            }
+            Ok(Structure::BaseBoard(data)) => {
+                println!("BaseBoard Information");
+                if !data.version.is_empty() {
+                    let version = data.version;
+                    // Assumes it's ASCII, which is guaranteed by SMBIOS
+                    let config_digit0 = &version[0..1];
+                    let config_digit0 = u8::from_str_radix(config_digit0, 16);
+                    if let Ok(version_config) =
+                        config_digit0.map(<ConfigDigit0 as FromPrimitive>::from_u8)
+                    {
+                        println!("  Version:      {:?} ({})", version_config, version);
+                    } else {
+                        println!("  Version:      '{}'", version);
+                    }
+                }
+                if !data.manufacturer.is_empty() {
+                    println!("  Manufacturer: {}", data.manufacturer);
+                }
+                if !data.product.is_empty() {
+                    println!("  Product:      {}", data.product);
+                }
+                if !data.serial.is_empty() {
+                    println!("  Serial Number:{}", data.serial);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn me_info(verbose: bool, dump_path: Option<&str>) {
+    let smbios = if let Some(path) = dump_path {
+        #[cfg(feature = "uefi")]
+        let data: Option<Vec<u8>> = crate::fw_uefi::fs::shell_read_file(path);
+        #[cfg(not(feature = "uefi"))]
+        let data = match std::fs::read(path) {
+            Ok(data) => Some(data),
+            Err(e) => {
+                error!("Failed to read SMBIOS dump file '{}': {}", path, e);
+                None
+            }
+        };
+        data.and_then(|d| smbios::SmbiosStore::from_table_data(d, 3, 0))
+    } else {
+        get_smbios()
+    };
+    if smbios.is_none() {
+        error!("Failed to get SMBIOS data");
+        return;
+    }
+    let smbios = smbios.unwrap();
+
+    // Track ME family for bootguard parsing
+    let mut me_family: Option<csme::MeFamily> = None;
+
+    // Try to get ME version from sysfs first (Linux only, live system only)
+    #[cfg(target_os = "linux")]
+    if dump_path.is_none() {
+        if let Ok(csme_info) = csme::csme_from_sysfs() {
+            println!("Intel ME Information (from sysfs)");
+            println!("  Enabled:          {}", csme_info.enabled);
+            println!("  Firmware Version: {}", csme_info.main_ver);
+            if csme_info.main_ver != csme_info.recovery_ver
+                || csme_info.main_ver != csme_info.fitc_ver
+            {
+                println!("  Recovery Version: {}", csme_info.recovery_ver);
+                println!("  FITC Version:     {}", csme_info.fitc_ver);
+            }
+            let family = csme::MeFamily::from_version(csme_info.main_ver.major);
+            println!("  ME Family:        {}", family);
+            me_family = Some(family);
+        }
+    }
+
+    // Get ME version from SMBIOS type 0xDD (FVI)
+    let smbios_version = csme::me_version_from_smbios(&smbios);
+    if let Some(ref fvi_version) = smbios_version {
+        // If sysfs wasn't available, use SMBIOS version as primary
+        if me_family.is_none() {
+            println!("Intel ME Version (from SMBIOS Type 0xDD)");
+            println!("  Firmware Version: {}", fvi_version);
+            let family = csme::MeFamily::from_version(fvi_version.major as u32);
+            println!("  ME Family:        {}", family);
+            me_family = Some(family);
+        } else if verbose {
+            // In verbose mode, also show SMBIOS version for comparison
+            println!("Intel ME Version (from SMBIOS Type 0xDD)");
+            println!("  Firmware Version: {}", fvi_version);
+        }
+    }
+
+    // Show handles found via Type 14 (Group Associations) - verbose only
+    if verbose {
+        let me_handles = csme::find_me_handles_from_type14(&smbios);
+        if !me_handles.is_empty() {
+            println!("ME Handles (from SMBIOS Type 14):");
+            for handle in &me_handles {
+                println!("  Handle: 0x{:04X}", handle);
+            }
+        }
+    }
+
+    // Parse SMBIOS type 0xDB for HFSTS registers
+    if let Some(me_fwsts) = csme::me_fwsts_from_smbios(&smbios) {
+        println!("Intel ME Status (SMBIOS Type 0xDB)");
+
+        if let Some(record) = me_fwsts.mei1() {
+            println!("  Working State:    {}", record.hfsts.working_state());
+            println!("  Operation Mode:   {}", record.hfsts.operation_mode());
+
+            // Parse bootguard status if we know the ME family
+            if let Some(family) = me_family {
+                if let Some(bootguard) = me_fwsts.bootguard_status(family) {
+                    println!("  Bootguard:");
+                    println!(
+                        "    Enabled:        {}",
+                        if bootguard.enabled { "Yes" } else { "No" }
+                    );
+                    if let Some(verified) = bootguard.verified_boot {
+                        println!(
+                            "    Verified Boot:  {}",
+                            if verified { "Yes" } else { "No" }
+                        );
+                    }
+                    println!(
+                        "    ACM Active:     {}",
+                        if bootguard.acm_active { "Yes" } else { "No" }
+                    );
+                    if let Some(done) = bootguard.acm_done {
+                        println!("    ACM Done:       {}", if done { "Yes" } else { "No" });
+                    }
+                    if let Some(ref policy) = bootguard.policy {
+                        println!("    Policy:         {}", policy);
+                    }
+                    println!(
+                        "    FPF SOC Lock:   {}",
+                        if bootguard.fpf_soc_lock { "Yes" } else { "No" }
+                    );
+                }
+            }
+
+            // Show raw HFSTS registers - verbose only
+            if verbose {
+                println!("  HFSTS Registers:");
+                println!("    HFSTS1: 0x{:08X}", record.hfsts.hfsts1);
+                println!("    HFSTS2: 0x{:08X}", record.hfsts.hfsts2);
+                println!("    HFSTS3: 0x{:08X}", record.hfsts.hfsts3);
+                println!("    HFSTS4: 0x{:08X}", record.hfsts.hfsts4);
+                println!("    HFSTS5: 0x{:08X}", record.hfsts.hfsts5);
+                println!("    HFSTS6: 0x{:08X}", record.hfsts.hfsts6);
+            }
+        }
+    } else {
+        error!("No Intel ME FWSTS table found in SMBIOS (type 0xDB)");
+    }
+}
+
+fn analyze_ccgx_pd_fw(data: &[u8]) {
+    // Each silicon family validates the family field in the binary, so at most
+    // one of these can match
+    let families = [
+        (Ccg3, "CCG3"),
+        (Ccg5, "CCG5"),
+        (Ccg6Adl, "CCG6"),
+        (Ccg6, "CCG6"),
+        (Ccg8D, "CCG8D"),
+        (Ccg8S, "CCG8S"),
+        (Ccg6Cfp, "CCG6 CFP"),
+        (Ccg8Cfp, "CCG8 CFP"),
+    ];
+    for (family, name) in families {
+        if let Some(versions) = ccgx::binary::read_versions(data, family) {
+            println!("Detected {} firmware", name);
+            println!("FW 1");
+            ccgx::binary::print_fw(&versions.backup_fw);
+
+            println!("FW 2");
+            ccgx::binary::print_fw(&versions.main_fw);
+            return;
+        }
+    }
+    println!("Failed to read PD versions")
+}
+
+pub fn analyze_ec_fw(data: &[u8]) {
+    // Readonly firmware
+    if let Some(ver) = ec_binary::read_ec_version(data, true) {
+        ec_binary::print_ec_version(&ver, true);
+    } else {
+        println!("Failed to read EC version")
+    }
+    // Readwrite firmware
+    if let Some(ver) = ec_binary::read_ec_version(data, false) {
+        ec_binary::print_ec_version(&ver, false);
+    } else {
+        println!("Failed to read EC version")
+    }
+}
+
+pub fn analyze_capsule(data: &[u8]) -> Option<capsule::EfiCapsuleHeader> {
+    let header = capsule::parse_capsule_header(data)?;
+    capsule::print_capsule_header(&header);
+
+    match GUID::from(header.capsule_guid) {
+        esrt::TGL_BIOS_GUID => {
+            println!("  Type:         Framework TGL Insyde BIOS");
+        }
+        esrt::ADL_BIOS_GUID => {
+            println!("  Type:         Framework ADL Insyde BIOS");
+        }
+        esrt::RPL_BIOS_GUID => {
+            println!("  Type:         Framework RPL Insyde BIOS");
+        }
+        esrt::MTL_BIOS_GUID => {
+            println!("  Type:         Framework MTL Insyde BIOS");
+        }
+        esrt::PTL_BIOS_GUID => {
+            println!("  Type:         Framework PTL Insyde BIOS");
+        }
+        esrt::FW12_RPL_BIOS_GUID => {
+            println!("  Type:         Framework Laptop 12 (RPL) Insyde BIOS");
+        }
+        esrt::WCL_BIOS_GUID => {
+            println!("  Type:         Framework Laptop 12 (WCL) Insyde BIOS");
+        }
+        esrt::AMD13_RYZEN7040_BIOS_GUID => {
+            println!("  Type:         Framework Laptop 13 (AMD Ryzen 7040) Insyde BIOS");
+        }
+        esrt::AMD13_AI300_BIOS_GUID => {
+            println!("  Type:         Framework Laptop 13 (AMD Ryzen AI 300) Insyde BIOS");
+        }
+        esrt::FL16_BIOS_GUID => {
+            println!("  Type:         Framework Laptop 16 (AMD Ryzen 7040) Insyde BIOS");
+        }
+        esrt::AMD16_AI300_BIOS_GUID => {
+            println!("  Type:         Framework Laptop 16 (AMD Ryzen AI 300) Insyde BIOS");
+        }
+        esrt::DESKTOP_AMD_AI300_BIOS_GUID => {
+            println!("  Type:         Framework Desktop (AMD Ryzen AI Max 300) Insyde BIOS");
+        }
+        esrt::TGL_RETIMER01_GUID => {
+            println!("  Type:    Framework TGL Retimer01 (Right)");
+        }
+        esrt::TGL_RETIMER23_GUID => {
+            println!("  Type:   Framework TGL Retimer23 (Left)");
+        }
+        esrt::ADL_RETIMER01_GUID => {
+            println!("  Type:    Framework ADL Retimer01 (Right)");
+        }
+        esrt::ADL_RETIMER23_GUID => {
+            println!("  Type:   Framework ADL Retimer23 (Left)");
+        }
+        esrt::RPL_RETIMER01_GUID => {
+            println!("  Type:    Framework RPL Retimer01 (Right)");
+        }
+        esrt::RPL_RETIMER23_GUID => {
+            println!("  Type:   Framework RPL Retimer23 (Left)");
+        }
+        esrt::MTL_RETIMER01_GUID => {
+            println!("  Type:    Framework MTL Retimer01 (Right)");
+        }
+        esrt::MTL_RETIMER23_GUID => {
+            println!("  Type:   Framework MTL Retimer23 (Left)");
+        }
+        esrt::PTL_RETIMER01_GUID => {
+            println!("  Type:    Framework PTL Retimer01 (Right)");
+        }
+        esrt::PTL_RETIMER23_GUID => {
+            println!("  Type:   Framework PTL Retimer23 (Left)");
+        }
+        esrt::WCL_RETIMER01_GUID => {
+            println!("  Type:    Framework WCL Retimer01 (Right)");
+        }
+        esrt::WCL_RETIMER23_GUID => {
+            println!("  Type:   Framework WCL Retimer23 (Left)");
+        }
+        esrt::RPL_CSME_GUID => {
+            println!("  Type:         Framework RPL CSME");
+        }
+        esrt::RPL_U_CSME_GUID => {
+            println!("  Type:         Framework RPL-U CSME");
+        }
+        esrt::MTL_CSME_GUID => {
+            println!("  Type:         Framework MTL CSME");
+        }
+        esrt::PTL_CSME_GUID => {
+            println!("  Type:         Framework PTL CSME");
+        }
+        esrt::WCL_CSME_GUID => {
+            println!("  Type:         Framework WCL CSME");
+        }
+        esrt::WINUX_GUID => {
+            println!("  Type:            Windows UX capsule");
+            let ux_header = capsule::parse_ux_header(data);
+            capsule::print_ux_header(&ux_header);
+        }
+        _ => {
+            println!("  Type:                      Unknown");
+        }
+    }
+
+    match esrt::match_guid_kind(&header.capsule_guid) {
+        esrt::FrameworkGuidKind::TglRetimer01
+        | esrt::FrameworkGuidKind::TglRetimer23
+        | esrt::FrameworkGuidKind::AdlRetimer01
+        | esrt::FrameworkGuidKind::AdlRetimer23
+        | esrt::FrameworkGuidKind::RplRetimer01
+        | esrt::FrameworkGuidKind::RplRetimer23
+        | esrt::FrameworkGuidKind::MtlRetimer01
+        | esrt::FrameworkGuidKind::MtlRetimer23
+        | esrt::FrameworkGuidKind::PtlRetimer01
+        | esrt::FrameworkGuidKind::PtlRetimer23
+        | esrt::FrameworkGuidKind::WclRetimer01
+        | esrt::FrameworkGuidKind::WclRetimer23 => {
+            if let Some(ver) = find_retimer_version(data) {
+                println!("  Version:      {:>18?}", ver);
+            }
+        }
+        _ => {}
+    }
+
+    Some(header)
+}
+
+fn handle_charge_limit(ec: &CrosEc, maybe_limit: Option<u8>) -> EcResult<()> {
+    let (cur_min, _cur_max) = ec.get_charge_limit()?;
+    if let Some(limit) = maybe_limit {
+        // Prevent setting unreasonable limits
+        if limit < 25 {
+            return Err(EcError::DeviceError(
+                "Not recommended to set charge limit below 25%".to_string(),
+            ));
+        } else if limit > 100 {
+            return Err(EcError::DeviceError(
+                "Charge limit cannot be set above 100%".to_string(),
+            ));
+        }
+        ec.set_charge_limit(cur_min, limit)?;
+    }
+
+    let (min, max) = ec.get_charge_limit()?;
+    println!("Minimum {}%, Maximum {}%", min, max);
+
+    Ok(())
+}
+
+fn handle_fp_led_level(ec: &CrosEc, maybe_led_level: Option<FpBrightnessArg>) -> EcResult<()> {
+    if let Some(led_level) = maybe_led_level {
+        ec.set_fp_led_level(led_level.into())?;
+    }
+
+    let (brightness, level) = ec.get_fp_led_level()?;
+    // TODO: Rename to power button
+    println!("Fingerprint LED Brightness");
+    if let Some(level) = level {
+        println!("  Requested:  {:?}", level);
+    }
+    println!("  Brightness: {}%", brightness);
+
+    Ok(())
+}
+
+fn handle_fp_brightness(ec: &CrosEc, maybe_brightness: Option<u8>) -> EcResult<()> {
+    if let Some(brightness) = maybe_brightness {
+        ec.set_fp_led_percentage(brightness)?;
+    }
+
+    let (brightness, level) = ec.get_fp_led_level()?;
+    // TODO: Rename to power button
+    println!("Fingerprint LED Brightness");
+    if let Some(level) = level {
+        println!("  Requested:  {:?}", level);
+    }
+    println!("  Brightness: {}%", brightness);
+
+    Ok(())
+}
