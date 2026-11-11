@@ -36,6 +36,7 @@ Lizenz GPL-3.0-or-later. Nutzerdoku: README.md, Entwicklerdoku: docs/development
 | `app/src/pages/*`, `pages/advanced/*` | Seiten (Übersicht, Ports, Thermik, System, Erweitert, Einstellungen); Erweitert ist in Live, Tuning, BatteryCare, Events, Setup zerlegt |
 | `app/src/components/*` | `ui` (Card, Button, ConfirmButton, Notice, Toast), `controls` (Row, Switch, NumberInput), `ResetPanel`, `LaptopDiagram`, `BatteryRing`, `Stat`, `LineChart`, `TuneTable`, `PowerBreakdown` |
 | `app/src/bindings/` | **generiert**, nie von Hand ändern |
+| `vendor/framework_lib` | gepatchtes `framework_lib` 0.6.6 (`[patch.crates-io]`), Änderungen in `PATCHES.md`, im Code mit `fw-ams patch` markiert |
 
 ## Datenfluss
 `Collector` → Poller-Thread (`poller.rs`: Kartengedächtnis, Ladesteuerung, Alerts, Sparmodus) → Tray + Event `snapshot` → `useSnapshot()`.
@@ -81,6 +82,9 @@ Tuner: App → Named Pipe `\\.\pipe\fw-ams-tuner` → `fw-ams-service` → `Engi
 - Windows-Energieplanwerte (EPP, Boost, max. Takt) sind dauerhaft, SMU-Werte nicht. Die Engine merkt sich Plan-Originale je AC/DC; `fw-ams-service uninstall` stellt sie wieder her, `--purge` löscht zusätzlich Profile und Log.
 - Ladelimit: Original steht in `charge-restore.json`, wird beim Ausschalten der Verwaltung zurückgeschrieben.
 - Kartengedächtnis (`cards.json`) wird mit `--mock` nicht gespeichert. Leerer Slot zeigt nur USB-A/USB-C aus dem Gedächtnis, aktive Karten nie (die brauchen Strom, leer = wirklich leer).
+- EC nach Standby: `framework_lib` (gepatcht) öffnet das Treiber-Handle nach einem fehlgeschlagenen IOCTL neu. `Collector` gibt den EC nach 3 Polls ohne Antwort auf (Fallback auf OS-Werte, `retry_ec` alle 30 s). Der Poller erkennt Standby an einer Lücke in der Wanduhr, versucht den EC sofort neu und ruft `ChargeController::resync()`. Meldet der EC ein anderes Ladelimit als gesendet, wird es höchstens einmal pro Minute neu geschrieben.
+- Commands, die `collector`/`charge`/`cards` sperren, sind `async` (Thread-Pool), sonst friert ein hängender EC-Zugriff die Fenster ein.
+- Linux ohne root: SMBIOS-Tabelle ist nicht lesbar, Hersteller/Produkt/BIOS kommen aus `/sys/class/dmi/id` (Patch in `framework_lib`, `read_smbios`).
 - Poller liest Settings unter der Collector-Sperre; `reset.rs` hält sie beim Ändern, sonst schreibt ein laufender Poll alte Werte zurück.
 - Bestätigungen über `ConfirmButton`, nicht `window.confirm`.
 - Pipe-Anfragen haben 5 s Timeout (`client::request`, Worker-Thread + `CancelSynchronousIo`), danach 15 s Fail-fast. Der Dienst bedient jeden Client in einem eigenen Thread.

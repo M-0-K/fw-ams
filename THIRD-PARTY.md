@@ -15,7 +15,7 @@ dir separat installiert.
 
 | Projekt | Lizenz | Wofür |
 |---|---|---|
-| [framework-system / framework_lib](https://github.com/FrameworkComputer/framework-system) | BSD-3-Clause | Zugriff auf den Embedded Controller, SMBIOS |
+| [framework-system / framework_lib](https://github.com/FrameworkComputer/framework-system) | BSD-3-Clause | Zugriff auf den Embedded Controller, SMBIOS. Liegt mit kleinen Korrekturen in `vendor/framework_lib/` (siehe `PATCHES.md` dort) |
 | [Tauri](https://tauri.app) | MIT oder Apache-2.0 | App-Rahmen, Tray, Fenster |
 | [nusb](https://github.com/kevinmehall/nusb) | MIT oder Apache-2.0 | USB-Geräteliste für die Kartenerkennung |
 | [starship-battery](https://github.com/starship/rust-battery) | ISC | Akkuwerte des Betriebssystems ohne EC |

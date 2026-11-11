@@ -3,6 +3,15 @@
 Alle nennenswerten Änderungen. Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
+## [Unreleased]
+
+### Behoben
+- Nach längerem Standby blieb die App ohne EC-Daten hängen, bis sie neu gestartet wurde, und
+  das Ladelimit wurde nicht mehr gesetzt. Ursache war ein Fehler in `framework_lib`: ein einziger
+  fehlgeschlagener Treiberaufruf legte den EC-Zugriff bis zum Neustart lahm. Jetzt verbindet sich
+  fw-ams neu, erkennt das Aufwachen und setzt Ladelimit und Ladestrom erneut; meldet der EC ein
+  anderes Ladelimit als eingestellt, wird es neu geschrieben (#4)
+
 ## [0.1.0] – 2026-10-20
 
 Erste öffentliche Version.
