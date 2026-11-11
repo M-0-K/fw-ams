@@ -3,6 +3,8 @@ import { modelLabel } from "../format";
 
 export default function SystemPage({ s }: { s: Snapshot }) {
   const rows: [string, string][] = [
+    ["fw-ams", s.system.appVersion],
+    ["Betriebssystem", s.system.os ?? "n/v"],
     ["Modell", modelLabel[s.system.model]],
     ["Produkt (SMBIOS)", s.system.product ?? "n/v"],
     ["BIOS", s.system.biosVersion ?? "n/v"],

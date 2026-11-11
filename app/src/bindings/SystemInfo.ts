@@ -5,4 +5,12 @@ export type SystemInfo = { model: Model,
 /**
  * SMBIOS product name, e.g. "Laptop 13 (AMD Ryzen AI 300 Series)"
  */
-product: string | null, biosVersion: string | null, ecVersion: string | null, pdVersions: Array<string>, };
+product: string | null, biosVersion: string | null, ecVersion: string | null, pdVersions: Array<string>, 
+/**
+ * e.g. "Windows 11 Pro 25H2 (Build 26200.7171)"
+ */
+os: string | null, 
+/**
+ * fw-ams version
+ */
+appVersion: string, };

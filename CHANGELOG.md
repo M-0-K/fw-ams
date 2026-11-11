@@ -5,6 +5,10 @@ Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
 ## [Unreleased]
 
+### Neu
+- Seite „System“ zeigt Betriebssystem (Windows-Edition, Version, Build bzw. Linux-Distribution
+  und Kernel) und die fw-ams-Version (#2)
+
 ### Behoben
 - Live-Diagramme zeigen einen festen Zeitraum statt einer festen Anzahl Messpunkte; Lücken
   (z. B. Ruhezustand) werden nicht mehr überbrückt. Zeitraum wählbar: 1, 5, 10 oder 30 min (#1)

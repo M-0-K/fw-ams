@@ -58,6 +58,7 @@ fn print_status(s: &Snapshot) {
         opt(s.system.ec_version.as_deref(), ""),
         s.system.pd_versions.join(" / ")
     );
+    println!("  {}  fw-ams {}", opt(s.system.os.as_deref(), ""), s.system.app_version);
     println!("  EC-Zugriff: {:?}", s.access.ec);
     if let Some(h) = &s.access.hint {
         println!("  Hinweis: {h}");

@@ -146,6 +146,8 @@ pub fn snapshot() -> Snapshot {
             bios_version: Some("03.05".into()),
             ec_version: Some("lilac-3.0.5-9010bdf 2025-10-30".into()),
             pd_versions: vec!["0.0.21".into(), "0.0.21".into()],
+            os: Some("Windows 11 Pro 25H2 (Build 26200.7171)".into()),
+            app_version: env!("CARGO_PKG_VERSION").into(),
         },
         access: AccessStatus {
             is_framework: true,
