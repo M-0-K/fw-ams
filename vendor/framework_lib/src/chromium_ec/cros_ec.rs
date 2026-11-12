@@ -178,6 +178,11 @@ pub fn send_command(command: u16, command_version: u8, data: &[u8]) -> EcResult<
     let fd = get_fildes()?;
     unsafe {
         let result = cros_ec_cmd(fd, cmd_ptr);
+        // fw-ams patch: a failed ioctl leaves `cmd.result` at 0xFF, so the status check below
+        // returns before `result` is looked at. Drop the file here so the next call reopens it.
+        if result.is_err() {
+            reset();
+        }
         let status: Option<EcResponseStatus> = FromPrimitive::from_u32(cmd.result);
         match &status {
             None => return Err(EcError::UnknownResponseCode(cmd.result)),
