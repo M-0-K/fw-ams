@@ -17,7 +17,8 @@ these fixes, delete this directory and the `[patch.crates-io]` entry.
    `lpBytesReturned`; it now gets a real one.
 2. `src/chromium_ec/cros_ec.rs`: same pattern on Linux (`unwrap()` on the file descriptor
    and on the ioctl result under the lock). Errors are returned, the file is reopened after a
-   failed ioctl, and a missing `/dev/cros_ec` is logged at debug level instead of printed.
+   failed ioctl (in `send_command` before the status check, which returns early on the 0xFF
+   that a failed ioctl leaves in `cmd.result`), and a missing `/dev/cros_ec` is logged at debug level instead of printed.
 3. `src/smbios.rs`: on Linux the raw SMBIOS table (`/sys/firmware/dmi/tables`) can only be
    read as root. Without it `is_framework()` returned `false` and `CrosEc` refused every
    command, even with access to `/dev/cros_ec` (fw-ams issue #3). `is_framework()` and
