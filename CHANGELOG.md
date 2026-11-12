@@ -3,7 +3,7 @@
 Alle nennenswerten Änderungen. Format nach [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionen nach [Semantic Versioning](https://semver.org/lang/de/).
 
-## [Unreleased]
+## [0.2.0] – 2026-11-12
 
 ### Neu
 - Seite „System“ zeigt Betriebssystem (Windows-Edition, Version, Build bzw. Linux-Distribution
@@ -44,4 +44,5 @@ Erste öffentliche Version.
 - Vollständiges Zurücksetzen: Erweiterte Funktionen aus, Werkseinstellungen und Deinstallation
   stellen alle Originalwerte wieder her
 
+[0.2.0]: https://github.com/M-0-K/fw-ams/releases/tag/v0.2.0
 [0.1.0]: https://github.com/M-0-K/fw-ams/releases/tag/v0.1.0
